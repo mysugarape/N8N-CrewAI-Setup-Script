@@ -296,7 +296,18 @@ module.exports = {
       N8N_EDITOR_BASE_URL: 'https://$DOMAIN/',
       N8N_SECURE_COOKIE: 'true',
       N8N_PROXY_HOPS: '1',
-      WEBHOOK_URL: 'https://$DOMAIN/',
+      // n8n 2.x: WEBHOOK_URL ist deprecated, N8N_WEBHOOK_URL gilt fuer
+      // Test- und Produktions-Webhooks.
+      N8N_WEBHOOK_URL: 'https://$DOMAIN/',
+      // Die folgenden Defaults werden sich in kommenden n8n-Versionen
+      // aendern. Hier explizit festgeschrieben, damit ein Update das
+      // Verhalten nicht unbemerkt veraendert.
+      N8N_UNVERIFIED_PACKAGES_ENABLED: 'false',
+      N8N_RUNNERS_TASK_TIMEOUT: '300',
+      // 256 MiB statt kuenftig 2 GiB: begrenzt die Entpackgroesse auf
+      // einem kleinen Server und wirkt als DoS-Bremse.
+      N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES: '268435456',
+      N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES: '1000',
       GENERIC_TIMEZONE: '$TIMEZONE'
     }
   }]

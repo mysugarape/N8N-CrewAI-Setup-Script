@@ -228,7 +228,11 @@ Diese Variablen stehen in `/root/n8n/ecosystem.config.cjs` und werden von PM2 an
 | `N8N_PROXY_HOPS` | `1` | Korrekte IP-Erkennung hinter dem Reverse Proxy |
 | `N8N_EDITOR_BASE_URL` | `https://$DOMAIN/` | Editor-URL hinter dem Proxy |
 | `N8N_SECURE_COOKIE` | `true` | Cookies nur über HTTPS |
-| `WEBHOOK_URL` | `https://$DOMAIN/` | Basis-URL für Webhooks |
+| `N8N_WEBHOOK_URL` | `https://$DOMAIN/` | Basis-URL für Test- und Produktions-Webhooks |
+| `N8N_UNVERIFIED_PACKAGES_ENABLED` | `false` | Installation ungeprüfter Community-Pakete unterbinden |
+| `N8N_RUNNERS_TASK_TIMEOUT` | `300` | Task-Timeout in Sekunden |
+| `N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES` | `268435456` | Max. Entpackgröße: 256 MiB |
+| `N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES` | `1000` | Max. ZIP-Einträge beim Entpacken |
 | `GENERIC_TIMEZONE` | Systemzeitzone | Zeitzone in n8n |
 | `DB_POSTGRESDB_*` | generiert | Datenbankverbindung |
 
@@ -238,6 +242,24 @@ Diese Variablen stehen in `/root/n8n/ecosystem.config.cjs` und werden von PM2 an
 sudo nano /root/n8n/ecosystem.config.cjs
 sudo pm2 restart n8n --update-env
 ```
+
+### Warnungen beim Start von n8n
+
+Beim ersten Start meldet n8n eine Reihe von Deprecation-Warnungen. Die wichtigsten davon und wie sie behandelt werden:
+
+| Meldung | Bedeutung | Status |
+|---------|-----------|--------|
+| `WEBHOOK_URL -> Use N8N_WEBHOOK_URL instead` | Alte Variable, wird entfernt | ✅ **Gefixt** — das Skript setzt `N8N_WEBHOOK_URL` |
+| `N8N_UNVERIFIED_PACKAGES_ENABLED ... will change to false` | Default ändert sich | ✅ Gefixt — explizit auf `false` gesetzt |
+| `N8N_RUNNERS_TASK_TIMEOUT ... will be reduced from 300 to 60` | Default ändert sich | ✅ Gefixt — auf `300` festgeschrieben |
+| `N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES ... 2 GiB to 256 MiB` | Default wird kleiner | ✅ Gefixt — auf 256 MiB gesetzt |
+| `N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES ... 5000 to 1000` | Default wird kleiner | ✅ Gefixt — auf `1000` gesetzt |
+| `Failed to start Python task runner in internal mode` | Bekannter n8n-Bug bei npm-Installation ([n8n-io/n8n#31149](https://github.com/n8n-io/n8n/issues/31149)) | ⚠️ Bekannt, nicht behoben |
+| `Running n8n outside a container is deprecated` | Künftige Versionen verlangen Docker | ⚠️ Bewusste Entscheidung, siehe unten |
+
+**Zum Python-Runner:** Diese Meldung betrifft ausschließlich den **Python-Code-Node** in n8n selbst. Sie tritt auf, weil n8n bei einer npm-Installation kein eigenes venv mitbringt — das offizielle Docker-Image liefert es mit. Alles andere funktioniert normal. Der separate **CrewAI-Service** dieses Setups ist davon **nicht** betroffen; er hat sein eigenes venv unter `/var/www/agent_service/venv`.
+
+**Zur Container-Warnung:** n8n hat den Betrieb außerhalb von Docker als veraltet eingestuft und kündigt an, dass künftige Versionen das offizielle Docker-Image voraussetzen. Dieses Setup nutzt bewusst **PM2 statt Docker**. Aktuell läuft n8n 2.41.6 problem damit. Sollte eine künftige n8n-Version die Installation ohne Container verweigern, ist ein Umstieg auf Docker Compose der nächste Schritt — die gepinnte `N8N_VERSION` im Skript macht ein solches Update planbar.
 
 ---
 
