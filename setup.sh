@@ -104,7 +104,19 @@ if [[ ! $CHK_AAPANEL =~ ^[Yy]$ ]]; then
     exit 1
 fi
 
-echo -e "\n${GREEN}✓ aaPanel vorhanden! Fahre mit der Konfiguration fort...${NC}\n"
+echo -e "\n${GREEN}✓ aaPanel vorhanden!${NC}"
+
+# Der PostgreSQL-Manager wird über den aaPanel App-Store installiert
+# (nur der Manager, keine Datenbank-Version). Das Skript richtet den
+# Server und die Datenbank selbst per apt/psql ein.
+ask "2. Ist der PostgreSQL-Manager in aaPanel installiert? (nur der Manager) (y/n) [y]: " CHK_PG_MANAGER "y"
+
+if [[ ! $CHK_PG_MANAGER =~ ^[Yy]$ ]]; then
+    echo -e "\n${YELLOW}[HINWEIS] Der PostgreSQL-Manager lässt sich nachträglich über"
+    echo "aaPanel → App-Store → PostgreSQL Manager installieren.${NC}"
+fi
+
+echo -e "\n${GREEN}Fahre mit der Konfiguration fort...${NC}\n"
 
 # ----------------------------------------------------------
 # SCHRITT 2: INTERAKTIVE ABFRAGE (NUR DOMAIN)
@@ -398,9 +410,9 @@ systemctl enable --now crewai
 # ----------------------------------------------------------
 # SCHRITT 7: SECRETS SPEICHERN & ZUSAMMENFASSUNG
 # ----------------------------------------------------------
-# Zugangsdaten landen nicht mehr im Klartext auf stdout, sondern in
-# einer root-only-Datei (chmod 600) — so stehen sie weder im
-# Terminal-Scrollback noch in Logs.
+# Zugangsdaten werden in einer root-only-Datei (chmod 600) gesichert
+# und am Ende noch einmal ausgegeben. Die Datei ist der dauerhafte
+# Ablageort: die Terminal-Ausgabe verschwindet mit dem Scrollback.
 umask 077
 cat <<EOF > "$SECRETS_FILE"
 # n8n & CrewAI Zugangsdaten — erzeugt von setup.sh
@@ -433,8 +445,21 @@ echo "----------------------------------------------------------"
 echo -e "${YELLOW}ZUGANGSDATEN:${NC}"
 echo " - n8n Domain:         https://$DOMAIN"
 echo -e " - CrewAI Endpoint:    http://127.0.0.1:$CREWAI_PORT"
-echo -e " - Credentials-Datei:  ${GREEN}$SECRETS_FILE${NC}"
-echo -e "   Anzeigen mit:      ${GREEN}cat $SECRETS_FILE${NC}"
+if [[ $REUSED_SECRETS -eq 1 ]]; then
+    echo " - (unverändert aus vorherigem Setup übernommen)"
+fi
+echo "----------------------------------------------------------"
+echo -e "${YELLOW}GENERIERTE PASSWÖRTER — bitte sicher verwahren:${NC}"
+echo -e " - Postgres Admin ('postgres'):   ${YELLOW}$DB_ADMIN_PASS${NC}"
+echo -e " - Datenbank-User ($DB_USER):   ${YELLOW}$DB_PASS${NC}"
+echo -e " - N8N_ENCRYPTION_KEY:            ${YELLOW}$N8N_ENCRYPTION_KEY${NC}"
+echo " - Datenbank-Name:      $DB_NAME"
+echo "----------------------------------------------------------"
+echo -e "${RED}ACHTUNG: Diese Passwörter stehen jetzt im Terminal-Scrollback"
+echo "und in Logs, falls die Ausgabe umgeleitet wurde. Bewahre die"
+echo "Credentials-Datei sicher auf und lösche sie nicht:${NC}"
+echo -e "   ${GREEN}$SECRETS_FILE${NC}"
+echo -e "   ${GREEN}cat $SECRETS_FILE${NC}"
 echo "----------------------------------------------------------"
 echo " NÄCHSTE SCHRITTE IN AAPANEL:"
 echo " 1. Erstelle die Website '$DOMAIN' in aaPanel."

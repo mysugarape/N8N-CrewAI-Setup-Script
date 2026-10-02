@@ -32,7 +32,7 @@ Das Skript führt sieben Schritte in einer durchgehenden, fehlertoleranten Sessi
 
 | Schritt | Inhalt |
 |---------|--------|
-| **1. Pre-Check** | Prüft Root-Rechte, benötigte Werkzeuge (`openssl`, `curl`) und fragt ab, ob aaPanel bereits läuft |
+| **1. Pre-Check** | Prüft Root-Rechte, benötigte Werkzeuge (`openssl`, `curl`) und fragt ab, ob aaPanel sowie der PostgreSQL-Manager bereits laufen |
 | **2. Konfiguration** | Fragt die Subdomain ab, generiert Passwörter und den `N8N_ENCRYPTION_KEY` |
 | **3. System** | Richtet 4 GB Swap ein, installiert Systempakete, PostgreSQL, Node.js LTS und Python3 |
 | **4. Datenbank** | Setzt das PostgreSQL-Superuser-Passwort und legt Datenbank, User und Rechte an |
@@ -57,9 +57,22 @@ Das Skript führt sieben Schritte in einer durchgehenden, fehlertoleranten Sessi
 
 - **Betriebssystem:** Debian 12 (Bookworm) — andere Distributionen werden nicht getestet
 - **aaPanel:** muss bereits installiert und laufend sein
+- **PostgreSQL-Manager in aaPanel:** muss über den App-Store von aaPanel installiert sein — **nur der Manager, nicht die Datenbank selbst** (siehe Hinweis unten)
 - **Root-Rechte:** das Skript legt Systemdateien an und startet Dienste
 - **Netzwerkzugriff** für `apt`, NodeSource und npm
 - **Fester Speicherplatz** von ca. 10 GB (Swap, PostgreSQL, Node-Module, Python-venv)
+
+### PostgreSQL-Manager über aaPanel
+
+Installiere vor dem Setup unter **aaPanel → App-Store → PostgreSQL Manager** den **Manager selbst**. Wähle dabei **keine** PostgreSQL-Version aus und lass keine Datenbank anlegen — das Skript erledigt beides anschließend selbst:
+
+- den PostgreSQL-Server per `apt-get install postgresql`
+- das Passwort des Superusers `postgres`
+- die Datenbank `n8n_db`, den User `n8n_db` und dessen Rechte
+
+> **Warum nur der Manager?** Wenn du im App-Store eine PostgreSQL-Version installierst, legt aaPanel eine eigene, abweichende Installation an. Das Skript würde dann `systemctl enable --now postgresql` auf einen Dienst anwenden, den aaPanel verwaltet — die Konfigurationen laufen auseinander. Installierst du nur den Manager, bleibt aaPanel die Verwaltungsoberfläche, der eigentliche Server stammt aber aus dem Skript.
+>
+> **Nach der Installation:** Der Manager in aaPanel kann nach dem Setup genutzt werden, um die Datenbank zu verwalten, Backups zu erstellen und Logs einzusehen. Damit der Dienst weiterhin von systemd und nicht von aaPanel gesteuert wird, ändere nichts an der PostgreSQL-Version im App-Store.
 
 > **Hinweis:** Bei einem frischen Debian 12 mit weniger als 4 GB RAM ist die Swap-Datei Pflicht, da PostgreSQL und n8n sonst beim Start in den OOM-Killer laufen.
 
@@ -74,15 +87,18 @@ git clone https://github.com/mysugarape/N8N-CrewAI-Setup-Script.git
 cd N8N-CrewAI-Setup-Script
 ```
 
+> **Vorher erledigen:** Stelle sicher, dass aaPanel läuft und der **PostgreSQL-Manager** über den App-Store installiert ist (nur der Manager, keine Datenbank-Version — Details unter [Voraussetzungen](#voraussetzungen)).
+
 ### 2. Skript ausführen
 
 ```bash
 sudo bash setup.sh
 ```
-Das Skript ist **vollständig interaktiv** und führt durch drei Abfragen:
+Das Skript ist **vollständig interaktiv** und führt durch vier Abfragen:
 
 ```
 1. Ist aaPanel auf diesem Server bereits fertig installiert? (y/n) [n]:
+2. Ist der PostgreSQL-Manager in aaPanel installiert? (nur der Manager) (y/n) [y]:
    → Domain-Abfrage:  Subdomain für n8n [Standard: n8n.formhabr.com]:
    → Bestätigung:     Möchtest du die Installation jetzt starten? (y/n) [y]:
 ```
@@ -111,11 +127,21 @@ INSTALLIERTE VERSIONEN:
 ZUGANGSDATEN:
  - n8n Domain:         https://n8n.formhabr.com
  - CrewAI Endpoint:    http://127.0.0.1:8000
- - Credentials-Datei:  /root/n8n-setup-credentials.txt
-   Anzeigen mit:      cat /root/n8n-setup-credentials.txt
+----------------------------------------------------------
+GENERIERTE PASSWÖRTER — bitte sicher verwahren:
+ - Postgres Admin ('postgres'):   <generiertes Passwort>
+ - Datenbank-User (n8n_db):   <generiertes Passwort>
+ - N8N_ENCRYPTION_KEY:            <generierter Schlüssel>
+ - Datenbank-Name:      n8n_db
+----------------------------------------------------------
+ACHTUNG: Diese Passwörter stehen jetzt im Terminal-Scrollback
+und in Logs, falls die Ausgabe umgeleitet wurde. Bewahre die
+Credentials-Datei sicher auf und lösche sie nicht:
+   /root/n8n-setup-credentials.txt
+   cat /root/n8n-setup-credentials.txt
 ```
 
-*(Die npm-Version hängt von der zum Installationszeitpunkt verfügbaren npm-10-Release ab und kann variieren.)*
+*(Die npm-Version hängt von der zum Installationszeitpunkt verfügbaren npm-10-Release ab und kann variieren. Die Passwörter sind hier nur als Platzhalter dargestellt.)*
 
 ---
 
@@ -139,7 +165,7 @@ Beim ersten Aufruf von n8n legst du ein Owner-Konto an. **Die Zugangsdaten dafü
 
 ## Zugangsdaten
 
-Alle Passwörter landen **nicht** im Terminal, sondern in einer Datei, die nur für root lesbar ist:
+Die generierten Passwörter werden **am Ende des Setups ausgegeben** und zusätzlich dauerhaft in einer Datei gesichert, die nur für root lesbar ist:
 
 ```bash
 cat /root/n8n-setup-credentials.txt
@@ -261,7 +287,7 @@ Alle drei sollten `enabled` ausgeben.
 
 ### Was das Skript tut
 
-- ✅ Passwörter und `N8N_ENCRYPTION_KEY` werden **nicht** auf dem Terminal ausgegeben, sondern in eine `chmod 600`-Datei geschrieben (`umask 077`)
+- ✅ Passwörter und `N8N_ENCRYPTION_KEY` werden am Ende ausgegeben **und** dauerhaft in einer `chmod 600`-Datei gesichert (`umask 077`), die nur für root lesbar ist
 - ✅ n8n lauscht nur auf `127.0.0.1` — Port 5678 ist nicht öffentlich erreichbar
 - ✅ SQL-Parameter werden über `psql -v` und `:'var'` übergeben statt per Heredoc-Interpolation
 - ✅ Die Domain-Eingabe wird gegen ungültige Zeichen validiert
