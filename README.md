@@ -5,6 +5,8 @@ Ein interaktives, idempotentes Bash-Skript, das auf einem **Debian 12**-Server m
 [![Shell](https://img.shields.io/badge/shell-bash-blue.svg)](https://www.gnu.org/software/bash/)
 [![Debian](https://img.shields.io/badge/debian-12-red.svg)](https://www.debian.org/)
 
+Repository: [github.com/mysugarape/N8N-CrewAI-Setup-Script](https://github.com/mysugarape/N8N-CrewAI-Setup-Script)
+
 ---
 
 ## Inhalt
@@ -68,8 +70,8 @@ Das Skript führt sieben Schritte in einer durchgehenden, fehlertoleranten Sessi
 ### 1. Repository klonen
 
 ```bash
-git clone <deine-repository-url>
-cd <dein-repository-ordner>
+git clone https://github.com/mysugarape/N8N-CrewAI-Setup-Script.git
+cd N8N-CrewAI-Setup-Script
 ```
 
 ### 2. Skript ausführen
@@ -77,7 +79,6 @@ cd <dein-repository-ordner>
 ```bash
 sudo bash setup.sh
 ```
-
 Das Skript ist **vollständig interaktiv** und führt durch drei Abfragen:
 
 ```
