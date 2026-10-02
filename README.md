@@ -1,0 +1,384 @@
+# n8n & CrewAI Setup-Skript (Debian 12 / aaPanel)
+
+Ein interaktives, idempotentes Bash-Skript, das auf einem **Debian 12**-Server mit **aaPanel** eine vollständige n8n-Installation mit PostgreSQL-Datenbank sowie einen CrewAI/FastAPI-Microservice einrichtet — beides über systemd bzw. PM2 dauerhaft im Autostart.
+
+[![Shell](https://img.shields.io/badge/shell-bash-blue.svg)](https://www.gnu.org/software/bash/)
+[![Debian](https://img.shields.io/badge/debian-12-red.svg)](https://www.debian.org/)
+
+---
+
+## Inhalt
+
+- [Was das Skript macht](#was-das-skript-macht)
+- [Voraussetzungen](#voraussetzungen)
+- [Installation](#installation)
+- [Nach der Installation: manuelle Schritte in aaPanel](#nach-der-installation-manuelle-schritte-in-aapanel)
+- [Zugangsdaten](#zugangsdaten)
+- [Gepinnte Versionen](#gepinnte-versionen)
+- [Wichtige Umgebungsvariablen](#wichtige-umgebungsvariablen)
+- [Befehle für den Alltag](#befehle-für-den-alltag)
+- [Sicherheitshinweise](#sicherheitshinweise)
+- [Verhalten bei erneutem Lauf](#verhalten-bei-erneutem-lauf)
+- [Fehlerbehebung](#fehlerbehebung)
+- [Projektstruktur](#projektstruktur)
+
+---
+
+## Was das Skript macht
+
+Das Skript führt sieben Schritte in einer durchgehenden, fehlertoleranten Session aus:
+
+| Schritt | Inhalt |
+|---------|--------|
+| **1. Pre-Check** | Prüft Root-Rechte, benötigte Werkzeuge (`openssl`, `curl`) und fragt ab, ob aaPanel bereits läuft |
+| **2. Konfiguration** | Fragt die Subdomain ab, generiert Passwörter und den `N8N_ENCRYPTION_KEY` |
+| **3. System** | Richtet 4 GB Swap ein, installiert Systempakete, PostgreSQL, Node.js LTS und Python3 |
+| **4. Datenbank** | Setzt das PostgreSQL-Superuser-Passwort und legt Datenbank, User und Rechte an |
+| **5. n8n** | Installiert n8n, schreibt eine PM2-Ecosystem-Datei, startet den Dienst und richtet den Reboot-Autostart ein |
+| **6. CrewAI** | Erstellt ein venv, installiert CrewAI/FastAPI/uvicorn, schreibt eine Beispiel-API und registriert sie als systemd-Service |
+| **7. Abschluss** | Schreibt alle Zugangsdaten in eine root-only-Datei und fasst die Versionen zusammen |
+
+### Konfigurationsdateien, die das Skript anlegt
+
+```
+/swapfile                                  4 GB Swap
+/etc/systemd/system/crewai.service         systemd-Unit für den FastAPI-Service
+/var/www/agent_service/main.py             Beispiel-API mit einem CrewAI-Agenten
+/var/www/agent_service/venv/                Python-virtualenv
+/root/n8n/ecosystem.config.cjs             PM2-Konfiguration mit allen n8n-Variablen
+/root/n8n-setup-credentials.txt            Zugangsdaten (nur für root lesbar)
+```
+
+---
+
+## Voraussetzungen
+
+- **Betriebssystem:** Debian 12 (Bookworm) — andere Distributionen werden nicht getestet
+- **aaPanel:** muss bereits installiert und laufend sein
+- **Root-Rechte:** das Skript legt Systemdateien an und startet Dienste
+- **Netzwerkzugriff** für `apt`, NodeSource und npm
+- **Fester Speicherplatz** von ca. 10 GB (Swap, PostgreSQL, Node-Module, Python-venv)
+
+> **Hinweis:** Bei einem frischen Debian 12 mit weniger als 4 GB RAM ist die Swap-Datei Pflicht, da PostgreSQL und n8n sonst beim Start in den OOM-Killer laufen.
+
+---
+
+## Installation
+
+### 1. Repository klonen
+
+```bash
+git clone <deine-repository-url>
+cd <dein-repository-ordner>
+```
+
+### 2. Skript ausführen
+
+```bash
+sudo bash setup.sh
+```
+
+Das Skript ist **vollständig interaktiv** und führt durch drei Abfragen:
+
+```
+1. Ist aaPanel auf diesem Server bereits fertig installiert? (y/n) [n]:
+   → Domain-Abfrage:  Subdomain für n8n [Standard: n8n.formhabr.com]:
+   → Bestätigung:     Möchtest du die Installation jetzt starten? (y/n) [y]:
+```
+
+> **Tipp:** Jede Eingabe kann mit **Enter** bestätigt werden, um den Standard zu übernehmen. Das Skript funktioniert auch ohne TTY — fehlende Eingaben fallen dann auf die Standardwerte zurück (nützlich für CI).
+
+### 3. Laufzeit
+
+Je nach Server-Leistung dauert die Installation **10 bis 25 Minuten**. Die größten Zeitfresser sind der Download der Node-Module und das Kompilieren der Python-Abhängigkeiten.
+
+### 4. Ergebnis
+
+Bei erfolgreichem Abschluss erscheint eine Zusammenfassung:
+
+```
+==========================================================
+ SETUP ERFOLGREICH ABGESCHLISTEN!
+==========================================================
+INSTALLIERTE VERSIONEN:
+ - Node.js:            v24.21.0
+ - npm:                10.x.y
+ - n8n:                2.41.6
+ - crewai / fastapi:   1.15.23 / 0.142.2
+ - uvicorn:            0.53.0
+----------------------------------------------------------
+ZUGANGSDATEN:
+ - n8n Domain:         https://n8n.formhabr.com
+ - CrewAI Endpoint:    http://127.0.0.1:8000
+ - Credentials-Datei:  /root/n8n-setup-credentials.txt
+   Anzeigen mit:      cat /root/n8n-setup-credentials.txt
+```
+
+*(Die npm-Version hängt von der zum Installationszeitpunkt verfügbaren npm-10-Release ab und kann variieren.)*
+
+---
+
+## Nach der Installation: manuelle Schritte in aaPanel
+
+Das Skript konfiguriert die Dienste, **nicht** den Reverse Proxy und **nicht** SSL. Diese Schritte musst du in aaPanel selbst durchführen:
+
+1. **Website anlegen** — unter *Websites* eine Website für deine Subdomain erstellen.
+2. **SSL aktivieren** — unter *SSL* ein Let's-Encrypt-Zertifikat ausstellen und **Force HTTPS** aktivieren.
+3. **Reverse Proxy einrichten** — auf `http://127.0.0.1:5678` weiterleiten.
+
+> **Wichtig:** n8n lauscht bewusst nur auf `127.0.0.1` (siehe `N8N_LISTEN_ADDRESS`). **Solange der Reverse Proxy nicht eingerichtet ist, ist n8n nicht erreichbar.** Das ist beabsichtigt: so liegt der Port niemals ungeschützt im Internet.
+
+Optional kannst du im selben Panel einen zweiten Reverse Proxy auf `http://127.0.0.1:8000` für den CrewAI-Service anlegen.
+
+### Ersten n8n-Login
+
+Beim ersten Aufruf von n8n legst du ein Owner-Konto an. **Die Zugangsdaten dafür vergibst du selbst** — sie werden nicht vom Skript erzeugt.
+
+---
+
+## Zugangsdaten
+
+Alle Passwörter landen **nicht** im Terminal, sondern in einer Datei, die nur für root lesbar ist:
+
+```bash
+cat /root/n8n-setup-credentials.txt
+```
+
+Inhalt:
+
+| Variable | Bedeutung |
+|----------|-----------|
+| `DOMAIN` | Konfigurierte Subdomain |
+| `DB_NAME` / `DB_USER` | Name der PostgreSQL-Datenbank und ihres Users |
+| `DB_PASS` | Passwort des Datenbank-Users |
+| `DB_ADMIN_PASS` | Passwort des PostgreSQL-Superusers `postgres` |
+| `N8N_ENCRYPTION_KEY` | Schlüssel zum Entschlüsseln der n8n-Credentials |
+| `N8N_PORT` / `CREWAI_PORT` | Ports der beiden Dienste |
+| `TIMEZONE` | Systemzeitzone, an n8n übergeben |
+
+> **⚠️ Unbedingt sichern.** Besonders `N8N_ENCRYPTION_KEY`: Geht dieser Schlüssel verloren, sind **alle** in n8n gespeicherten Credentials (API-Keys, OAuth-Tokens, Datenbank-Verbindungen) **unwiederbringlich unentschlüsselbar**. Es gibt keine Wiederherstellung — nur ein neues, leeres n8n.
+
+---
+
+## Gepinnte Versionen
+
+Alle Abhängigkeiten sind bewusst **fest versioniert** am Skriptanfang, statt mit `@latest` installiert zu werden. Grund: n8n veröffentlicht fast wöchentlich neue Minor-Versionen, und ein ungepinntes `@latest` kann durch ein Update von heute auf morgen den Aufbau brechen.
+
+| Komponente | Version | Hinweis |
+|------------|---------|---------|
+| Node.js | `24.21.0` | Active LTS. n8n verlangt ≥ 20.19 |
+| n8n | `2.41.6` | Stable-Kanal. **Nicht** 3.x — enthält Breaking Changes |
+| crewai | `1.15.23` | |
+| fastapi | `0.142.2` | |
+| uvicorn | `0.53.0` | |
+
+### Versionen aktualisieren
+
+Die Pins stehen im Block am Anfang von `setup.sh`:
+
+```bash
+NODE_VERSION="24.21.0"
+N8N_VERSION="2.41.6"
+CREWAI_VERSION="1.15.23"
+FASTAPI_VERSION="0.142.2"
+UVICORN_VERSION="0.53.0"
+```
+
+Nach einer Änderung das Skript erneut ausführen. Es ist idempotent: vorhandene Services werden ersetzt, Datenbank und Zugangsdaten bleiben erhalten.
+
+> **Hinweis zu n8n 3.0:** Die n8n-Changelog kündigt 3.0 für Oktober 2026 an. Ein Upgrade auf die 3.x-Reihe ist **kein einfacher Versionswechsel** — lies vor dem Update die [Breaking-Changes-Dokumentation](https://docs.n8n.io/changelog/v30-breaking-changes).
+
+---
+
+## Wichtige Umgebungsvariablen
+
+Diese Variablen stehen in `/root/n8n/ecosystem.config.cjs` und werden von PM2 an n8n durchgereicht:
+
+| Variable | Wert | Zweck |
+|----------|------|-------|
+| `N8N_ENCRYPTION_KEY` | generiert | **Pflicht.** Entschlüsselt gespeicherte Credentials |
+| `N8N_LISTEN_ADDRESS` | `127.0.0.1` | Bindet n8n nur lokal — kein offener Port |
+| `N8N_PROXY_HOPS` | `1` | Korrekte IP-Erkennung hinter dem Reverse Proxy |
+| `N8N_EDITOR_BASE_URL` | `https://$DOMAIN/` | Editor-URL hinter dem Proxy |
+| `N8N_SECURE_COOKIE` | `true` | Cookies nur über HTTPS |
+| `WEBHOOK_URL` | `https://$DOMAIN/` | Basis-URL für Webhooks |
+| `GENERIC_TIMEZONE` | Systemzeitzone | Zeitzone in n8n |
+| `DB_POSTGRESDB_*` | generiert | Datenbankverbindung |
+
+### Konfiguration anpassen
+
+```bash
+sudo nano /root/n8n/ecosystem.config.cjs
+sudo pm2 restart n8n --update-env
+```
+
+---
+
+## Befehle für den Alltag
+
+### n8N
+
+```bash
+pm2 status                              # Status aller PM2-Prozesse
+pm2 logs n8n --lines 50                # Letzte 50 Logzeilen
+pm2 logs n8n --err                     # Nur Fehler
+pm2 restart n8n                        # Neustart
+pm2 stop n8n                           # Stoppen
+pm2 save                               # Aktuelle Prozessliste speichern
+```
+
+### CrewAI-Service
+
+```bash
+sudo systemctl status crewai
+sudo systemctl restart crewai
+sudo journalctl -u crewai -f           # Live-Logs
+curl -X POST http://127.0.0.1:8000/run-agent \
+  -H 'Content-Type: application/json' \
+  -d '{"topic":"Vorteile von n8n"}'
+```
+
+### Datenbank
+
+```bash
+sudo -u postgres psql -d n8n_db        # In die Datenbank einsteigen
+sudo -u postgres psql -c '\l'          # Alle Datenbanken auflisten
+sudo systemctl status postgresql
+```
+
+### Autostart prüfen
+
+```bash
+systemctl is-enabled pm2-root crewai postgresql
+```
+
+Alle drei sollten `enabled` ausgeben.
+
+---
+
+## Sicherheitshinweise
+
+### Was das Skript tut
+
+- ✅ Passwörter und `N8N_ENCRYPTION_KEY` werden **nicht** auf dem Terminal ausgegeben, sondern in eine `chmod 600`-Datei geschrieben (`umask 077`)
+- ✅ n8n lauscht nur auf `127.0.0.1` — Port 5678 ist nicht öffentlich erreichbar
+- ✅ SQL-Parameter werden über `psql -v` und `:'var'` übergeben statt per Heredoc-Interpolation
+- ✅ Die Domain-Eingabe wird gegen ungültige Zeichen validiert
+- ✅ Alle Passwörter sind 32 Zeichen alphanumerisch und werden deterministisch generiert
+- ✅ SQL-Fehler führen zum Abbruch (`ON_ERROR_STOP=1`) statt zu einem stillen Weiterlaufen mit kaputter Datenbank
+
+### Was du wissen solltest
+
+> **⚠️ Der CrewAI-Service läuft als `root`.**
+> Der FastAPI-Server führt von LLM-Agenten generierten Code aus. Jeder Fehler in crewai, jeder manipulierte Prompt wird damit zu einem Fehler mit Root-Rechten. Besser wäre ein dedizierter unprivilegierter Systemuser — das Skript kommentiert diese Stelle entsprechend.
+
+> **⚠️ Es werden keine Firewall-Regeln gesetzt.**
+> Das Skript konfiguriert keine Firewall. Für einen Produktivbetrieb solltest du zusätzlich nur die nötigen Ports öffnen (22, 80, 443) und alle anderen schließen.
+
+> **⚠️ Das PostgreSQL-Superuser-Passwort wird gesetzt.**
+> Das Skript setzt das Passwort des Users `postgres`. Bei einer bestehenden Installation mit `peer`-Authentifizierung kann das die lokale Anmeldung verändern.
+
+> **⚠️ Keine Datensicherung eingerichtet.**
+> Das Skript richtet **keine** Backups ein. Richte vor dem Produktivbetrieb eine Sicherung der Datenbank `n8n_db` ein.
+
+---
+
+## Verhalten bei erneutem Lauf
+
+Das Skript ist **idempotent** und kann gefahrlos mehrfach ausgeführt werden:
+
+- **Passwörter werden wiederverwendet**, nicht neu generiert. Dadurch bleibt die bestehende Datenbankverbindung gültig
+- **`N8N_ENCRYPTION_KEY` bleibt unverändert** — andernfalls wären alle gespeicherten Credentials verloren
+- **Die Domain aus der Credentials-Datei wird als Standard angeboten**
+- Bestehende Swap-Datei, Pakete und systemd-Unit werden erkannt und übersprungen
+- PM2-Prozess `n8n` wird vor dem Neustart gelöscht und neu angelegt
+
+Damit eignet sich das Skript auch, um **einzelne Komponenten zu aktualisieren**, ohne eine Neuinstallation zu machen.
+
+---
+
+## Fehlerbehebung
+
+### Das Skript bricht sofort mit „Fehler in Zeile NNN" ab
+
+Das Skript nutzt `set -euo pipefail` und einen ERR-Trap, der die fehlerhafte Zeile nennt. Prüfe die Ausgabe von `bash -x setup.sh` für eine vollständige Ablaufverfolgung.
+
+### `pm2: command not found`
+
+Nach der Node-Installation wurde der Pfad eventuell nicht neu eingelesen:
+
+```bash
+source /etc/profile.d/nvm.sh 2>/dev/null
+export PATH="$PATH:$(npm root -g | sed 's|/node_modules$|/../bin|')"
+hash -r
+```
+
+### n8n startet nicht
+
+```bash
+pm2 logs n8n --lines 100
+pm2 status
+```
+
+Häufigste Ursache: die Datenbankverbindung schlägt fehl. Prüfe:
+
+```bash
+sudo -u postgres psql -c "SELECT 1 FROM pg_roles WHERE rolname='n8n_db';"
+```
+
+### `n8n läuft nicht` trotz erfolgreicher Installation
+
+Der Zustand kann auch an einer falschen `N8N_ENCRYPTION_KEY` liegen — etwa wenn die Credentials-Datei zwischen zwei Läufen gelöscht wurde. Prüfe, ob die Datei existiert:
+
+```bash
+ls -l /root/n8n-setup-credentials.txt
+```
+
+Fehlt sie, erzeugt ein erneuter Lauf einen **neuen** Key. Nur sinnvoll, wenn n8n ohnehin neu aufgesetzt werden soll.
+
+### n8n ist nicht erreichbar
+
+Prüfe, ob der Reverse Proxy in aaPanel eingerichtet ist:
+
+```bash
+curl -I http://127.0.0.1:5678       # muss lokal antworten
+```
+
+Antwortet der Port lokal, aber nicht über die Domain, liegt der Fehler am Reverse Proxy oder am SSL-Zertifikat.
+
+### Swap wurde nicht angelegt
+
+```bash
+swapon --show
+grep swap /etc/fstab
+```
+
+Auf btrfs und einigen XFS-Setups wird `fallocate` nicht unterstützt; das Skript weicht dann automatisch auf `dd` aus.
+
+---
+
+## Projektstruktur
+
+```
+.
+├── setup.sh       # Das Setup-Skript
+├── README.md      # Diese Datei
+└── .gitattributes # LF-Zeilenenden
+```
+
+---
+
+## Lizenz
+
+Dieses Skript steht unter der [MIT-Lizenz](https://opensource.org/licenses/MIT).
+
+---
+
+## Verwandte Links
+
+- [n8n Dokumentation](https://docs.n8n.io/)
+- [n8n Changelog](https://docs.n8n.io/changelog)
+- [CrewAI Dokumentation](https://docs.crewai.com/)
+- [FastAPI Dokumentation](https://fastapi.tiangolo.com/)
+- [aaPanel](https://www.aapanel.com/)
+- [Node.js Releases](https://nodejs.org/en/about/previous-releases)
