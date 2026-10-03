@@ -552,6 +552,11 @@ The script is **idempotent** and can safely be run multiple times:
 
 This also makes the script suitable for **updating individual components** without doing a fresh installation.
 
+> **⚠️ Re-running after an aborted run can break n8n.**
+> If a previous run died before writing `/root/n8n-setup-credentials.txt` — for example at the port check in phase 7 — n8n has already stored its own key in `/root/.n8n/config`, while the next run generates a second one. n8n then refuses to start with a mismatching-key error and the domain returns a 502. See [n8n crash-loops and the browser shows a 502](#n8n-crash-loops-and-the-browser-shows-a-502).
+>
+> Before re-running, check that `/root/n8n-setup-credentials.txt` exists. If it does not, copy the key out of `/root/.n8n/config` into the file first, or simply create the file from the values the aborted run printed.
+
 ---
 
 ## Troubleshooting
@@ -583,15 +588,68 @@ Most common cause: the database connection fails. Check:
 sudo -u postgres psql -c "SELECT 1 FROM pg_roles WHERE rolname='n8n_db';"
 ```
 
-### `n8n is not running` despite a successful installation
+### n8n crash-loops and the browser shows a 502
 
-The state can also be down to a wrong `N8N_ENCRYPTION_KEY` — for example if the credentials file was deleted between two runs. Check whether the file exists:
+Symptom: `pm2 status` shows the process as `online` but the restart counter
+(`↺`) climbs continuously. The domain returns **502 Bad Gateway**.
 
 ```bash
-ls -l /root/n8n-setup-credentials.txt
+pm2 status | grep n8n                    # ↺ keeps rising
+pm2 logs n8n --lines 30 --err
+tail -20 /www/wwwlogs/n8n.formhabr.com.error.log
 ```
 
-If it is missing, another run generates a **new** key. That only makes sense if you want to set n8n up from scratch anyway.
+The n8n log names the cause directly:
+
+```
+UserError: Mismatching encryption keys. The encryption key in the settings
+file /root/.n8n/config does not match the N8N_ENCRYPTION_KEY env var.
+```
+
+The nginx log then shows the consequence — nothing is listening on 5678:
+
+```
+connect() failed (111: Connection refused) while connecting to upstream,
+upstream: "http://127.0.0.1:5678/"
+```
+
+**Cause.** n8n stores the encryption key itself in `/root/.n8n/config` on first
+start and refuses to start if the environment variable differs. The script
+generates a new `N8N_ENCRYPTION_KEY` only when `/root/n8n-setup-credentials.txt`
+is missing. So a single uninterrupted run can never hit this — there is no
+config file to disagree with. The mismatch needs an **aborted first run**: that
+run started n8n (writing the config file) but died before writing the
+credentials file, so the next run generated a second key.
+
+**Fix** — give the key n8n already uses precedence. Nothing stored in n8n is
+touched, since only the environment variable changes:
+
+```bash
+KEY=$(sed -n 's/.*"encryptionKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /root/.n8n/config | head -1)
+echo "Laenge: ${#KEY}"          # 32 hex characters — anything else, stop here
+
+cp /root/n8n/ecosystem.config.cjs /root/n8n/ecosystem.config.cjs.bak
+sed -i "s|N8N_ENCRYPTION_KEY: '[^']*'|N8N_ENCRYPTION_KEY: '$KEY'|" /root/n8n/ecosystem.config.cjs
+
+# Recreate the process instead of restarting it: `pm2 restart --update-env`
+# does not reliably re-read the ecosystem file.
+pm2 delete n8n
+pm2 start /root/n8n/ecosystem.config.cjs
+pm2 save
+
+# Then align the credentials file, otherwise the backup holds the wrong key
+sed -i "s|^N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY='$KEY'|" /root/n8n-setup-credentials.txt
+```
+
+Confirm all three now agree — the ecosystem file, the credentials file and
+n8n's own config:
+
+```bash
+grep -h N8N_ENCRYPTION_KEY /root/n8n/ecosystem.config.cjs /root/n8n-setup-credentials.txt
+sed -n 's/.*"encryptionKey": *"\([^"]*\)".*/\1/p' /root/.n8n/config
+```
+
+Afterwards `pm2 status` must show `↺ 0` and port 5678 must be listening again.
 
 ### n8n is unreachable
 
