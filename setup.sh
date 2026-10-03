@@ -201,7 +201,11 @@ fi
 
 echo -e "\n=== 2. System-Pakete, PostgreSQL, Node.js LTS & Python3 installieren ==="
 apt-get update -y
-apt-get install -y curl build-essential python3-pip python3-venv python3-dev postgresql postgresql-contrib sudo
+# iproute2 liefert `ss`, mit dem unten verifiziert wird, dass der
+# CrewAI-Dienst wirklich auf seinem Port lauscht. Ohne das Paket
+# waere die Pruefung still — sie wuerde 60 Sekunden warten und dann
+# eine falsche Fehlermeldung ausgeben.
+apt-get install -y curl build-essential python3-pip python3-venv python3-dev postgresql postgresql-contrib sudo iproute2
 
 # PostgreSQL Service starten & aktivieren
 systemctl enable --now postgresql
@@ -353,6 +357,33 @@ echo -e "\n=== 6. CrewAI & FastAPI installieren ==="
 # Klartext auslieferbar. /opt ist FHS-konform für Dienste und liegt
 # außerhalb jedes denkbaren nginx-Roots.
 AGENT_DIR="/opt/agent_service"
+AGENT_USER="crewai"
+AGENT_GROUP="crewai"
+
+# Eigener unprivilegierter Systemuser für den Agent-Service.
+#
+# Vorher lief der Dienst als root. Das war die schwächste Stelle des
+# Setups: Der FastAPI-Server führt von LLM-Agenten erzeugten Code aus,
+# und crewai interpretiert Modell-Ausgaben als Anweisungen. Jeder Fehler
+# im Modell, jeder manipulierte Prompt war damit ein Fehler mit
+# Root-Rechten auf dem Host.
+#
+# --system: kein Login, keine Altersbeschränkung, System-UID-Bereich.
+# --no-create-home: das Home wird nicht gebraucht, siehe STATE_DIR.
+# --shell /usr/sbin/nologin: verhindert auch versehentliche SSH-Logins.
+if ! getent group "$AGENT_GROUP" >/dev/null; then
+    groupadd --system "$AGENT_GROUP"
+fi
+if ! id -u "$AGENT_USER" >/dev/null 2>&1; then
+    useradd --system --gid "$AGENT_GROUP" --no-create-home \
+            --shell /usr/sbin/nologin \
+            --home-dir "$AGENT_DIR" --comment "CrewAI Agent Service" \
+            "$AGENT_USER"
+    echo "✓ Systemuser $AGENT_USER angelegt"
+else
+    echo "✓ Systemuser $AGENT_USER existiert bereits"
+fi
+
 mkdir -p "$AGENT_DIR"
 cd "$AGENT_DIR"
 
@@ -370,11 +401,24 @@ fi
     "uvicorn==$UVICORN_VERSION" \
     "python-dotenv"
 
+# crewai legt seinen SQLite-Speicher über appdirs unter
+# ~/.local/share/<projektname> an und ruft dabei mkdir auf. Ohne
+# beschreibbares Home scheitert der Dienst. STATE_DIR ist deshalb
+# ein eigener Ordner mit crewai-Eigentum, auf den die Unit per
+# ReadWritePaths freigibt — der Service kann dort schreiben, ohne
+# Schreibrechte auf den Projektordner selbst zu bekommen.
+STATE_DIR="/var/lib/crewai"
+mkdir -p "$STATE_DIR"
+chown "$AGENT_USER:$AGENT_GROUP" "$STATE_DIR"
+chmod 750 "$STATE_DIR"
+
 # Vorlage ohne Secret — geht ins Repo. Die echte .env entsteht manuell
 # (siehe Abschlussausgabe), damit der API-Key nie durch dieses Skript
 # läuft und damit schon gar nicht im Quelltext landen kann.
 cat << 'EOF' > "$AGENT_DIR/.env.example"
-# Anthropic-Zugang — von Hand ausfüllen, danach chmod 600 setzen.
+# Anthropic-Zugang — von Hand ausfüllen. Rechte danach auf
+# root:crewai 640 setzen: der Dienst läuft als Systemuser crewai und
+# muss die Datei über die Gruppe lesen können.
 ANTHROPIC_API_KEY=sk-ant-hier-eintragen
 
 # Modell. Der Provider-Präfix "anthropic/" ist bei crewai Pflicht.
@@ -405,6 +449,16 @@ from pydantic import BaseModel
 # WorkingDirectory=AGENT_DIR, aber ein manueller Aufruf aus einem
 # anderen Verzeichnis würde die .env sonst nicht finden.
 load_dotenv(Path(__file__).resolve().parent / ".env")
+
+# crewai legt seinen SQLite-Speicher über appdirs unter
+# ~/.local/share/<projektname> an und ruft dabei mkdir auf. Der Dienst
+# läuft als unprivilegierter Systemuser ohne beschreibbares Home —
+# ohne dieses Verzeichnis scheitert der Start. Der Pfad ist in der
+# systemd-Unit über ReadWritePaths freigegeben.
+#
+# setdefault, nicht hart setzen: ein Betreiber kann den Wert in der .env
+# überschreiben, und der Default greift nur, wenn er fehlt.
+os.environ.setdefault("CREWAI_STORAGE_DIR", "/var/lib/crewai")
 
 app = FastAPI()
 
@@ -476,12 +530,38 @@ async def run_agent(data: AgentRequest):
     }
 EOF
 
+# ---------- Rechte am Projektordner ---------------------------
+# Zwei Ziele gleichzeitig, die im Widerspruch zueinander stehen:
+#   1. Der Dienst (als crewai) muss .env mit dem API-Key lesen können.
+#   2. Der Key darf nicht für andere lokale Benutzer lesbar sein.
+#
+# Lösung ist eine Gruppenbesitz-Gruppe: .env gehört root:crewai mit
+# 640. root darf alles, die Gruppe crewai kann lesen — und sonst
+# niemand. Der Ordner selbst bleibt root:root 755, damit der Dienst
+# durch ihn traversieren kann, ohne ihn zu besitzen.
+#
+# Wichtig: die Rechte werden NACH dem Anlegen der .env gesetzt,
+# sonst würde ein chmod 600 den Dienst aus der Gruppe aussperren.
+chown -R root:root "$AGENT_DIR"
+chmod 755 "$AGENT_DIR"
+chown root:root "$AGENT_DIR/main.py"
+chmod 644 "$AGENT_DIR/main.py"
+
+# Die .env existiert in einem frischen Setup noch gar nicht — das
+# Skript legt nur .env.example an, der Key wird danach von Hand
+# eingetragen. Ohne diese Prüfung bricht chown unter `set -e` das
+# komplette Setup ab.
+if [[ -f "$AGENT_DIR/.env" ]]; then
+    chown root:"$AGENT_GROUP" "$AGENT_DIR/.env"
+    chmod 640 "$AGENT_DIR/.env"
+    echo "✓ Rechte an .env gesetzt (root:crewai 640)"
+else
+    echo -e "${YELLOW}  Noch keine .env vorhanden — Rechte werden beim${NC}"
+    echo -e "${YELLOW}  manuellen Anlegen gesetzt. Nach 'nano .env':${NC}"
+    echo "    chown root:crewai $AGENT_DIR/.env && chmod 640 $AGENT_DIR/.env"
+fi
 
 echo -e "\n=== 7. Systemd Service für CrewAI erstellen & starten ==="
-# ACHTUNG: User=root ist die schwächste Stelle dieses Setups.
-# Der FastAPI-Server führt generierten Agent-Code aus — jeder Fehler
-# in crewai oder in einem Prompt ist damit ein Root-Fehler. Besser
-# wäre ein dedizierter unprivilegierter Systemuser.
 cat << EOF > /etc/systemd/system/crewai.service
 [Unit]
 Description=CrewAI FastAPI Service
@@ -489,11 +569,35 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=root
+User=$AGENT_USER
+Group=$AGENT_GROUP
 WorkingDirectory=$AGENT_DIR
 ExecStart=$AGENT_DIR/venv/bin/uvicorn main:app --host 127.0.0.1 --port $CREWAI_PORT
 Restart=always
 RestartSec=5
+
+# --- Härtung ---
+# Das ersetzt keine echte Sandbox, aber es begrenzt die Folgen, wenn
+# ein manipulierter Prompt oder ein Bug im Modell Code ausführt.
+
+# Keine neuen setuid-Bits: verhindert Eskalation über SUID-Programme.
+NoNewPrivileges=true
+
+# Nur /var/lib/crewai beschreibbar. $AGENT_DIR wird für das Lesen der
+# .env und der .py-Dateien gebraucht, nicht zum Schreiben. Ohne das
+# könnte ein Fehler im Agenten die main.py überschreiben.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=$STATE_DIR
+
+# Kein Zugriff auf proc/sys als root. Devices nur die Standard-Liste.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target
@@ -501,6 +605,72 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now crewai
+
+# Der Service muss nach dem Start tatsächlich laufen. systemctl
+# enable --now exit 0 auch dann, wenn der Prozess direkt danach
+# stirbt — etwa weil die Unit User=crewai verwendet, der User aber
+# die .env nicht lesen kann, oder weil der erste Import von crewai
+# fehlschlägt. Ohne diese Prüfung meldet das Skript Erfolg, während
+# der Dienst tot ist.
+#
+# Kein fester sleep: der erste Import von crewai dauert messbar
+# (pydantic, litellm, .pyc-Erzeugung beim Erstlauf). Stattdessen
+# polling mit Abbruch, sobald der Dienst stirbt.
+CREWAI_READY=0
+for _ in $(seq 1 30); do
+    if ss -ltn 2>/dev/null | grep -q ":$CREWAI_PORT[[:space:]]"; then
+        CREWAI_READY=1
+        break
+    fi
+    if ! systemctl is-active --quiet crewai; then
+        break
+    fi
+    sleep 2
+done
+
+# Fehlt ss trotzdem (etwa weil iproute2 nicht installiert werden
+# konnte), waere die Pruefung oben bedeutungslos und wuerde nach
+# 60 Sekunden faelschlich "lauscht nicht" melden. In dem Fall wird
+# nur gewarnt, nicht abgebrochen — der Dienst koennte laufen.
+HAVE_SS=0
+if command -v ss >/dev/null 2>&1; then
+    HAVE_SS=1
+else
+    echo -e "${YELLOW}! ss nicht verfügbar — Port-Prüfung nicht möglich.${NC}"
+    echo -e "${YELLOW}  Installiere iproute2 und prüfe dann:${NC}"
+    echo "    apt-get install -y iproute2 && ss -ltn | grep :$CREWAI_PORT"
+fi
+
+if [[ $HAVE_SS -eq 1 ]]; then
+    if [[ $CREWAI_READY -ne 1 ]]; then
+        echo -e "${RED}[ABBRUCH] Der CrewAI-Service lauscht nicht auf Port $CREWAI_PORT.${NC}"
+        echo "Häufigste Ursachen:"
+        echo "  - Der Systemuser $AGENT_USER kann eine Datei nicht lesen."
+        echo "    Prüfe: ls -la $AGENT_DIR/main.py   (sollte root:root 644 sein)"
+        echo "  - Der Import von crewai scheitert."
+        echo "Logs zeigen den echten Fehler:"
+        echo "  systemctl status crewai"
+        echo "  journalctl -u crewai --lines 50 --no-pager"
+        echo
+        echo "n8n und PostgreSQL laufen bereits. Nach dem Beheben:"
+        echo "  systemctl restart crewai"
+        exit 1
+    fi
+    echo "✓ CrewAI-Service läuft und lauscht auf 127.0.0.1:$CREWAI_PORT"
+else
+    # Ohne ss laesst sich die Bindung nicht pruefen. Der Dienst kann
+    # trotzdem laufen — deshalb nur der Zustand, kein Abbruch.
+    SERVICE_STATE="$(systemctl is-active crewai 2>/dev/null || true)"
+    if [[ $SERVICE_STATE == "active" ]]; then
+        echo -e "${YELLOW}! CrewAI-Service ist aktiv, Port konnte nicht geprüft werden.${NC}"
+        echo "    Bitte manuell verifizieren: ss -ltn | grep :$CREWAI_PORT"
+    else
+        echo -e "${RED}[ABBRUCH] CrewAI-Service ist '$SERVICE_STATE'.${NC}"
+        echo "  systemctl status crewai"
+        echo "  journalctl -u crewai --lines 50 --no-pager"
+        exit 1
+    fi
+fi
 
 # ----------------------------------------------------------
 # SCHRITT 7: SECRETS SPEICHERN & ZUSAMMENFASSUNG
@@ -549,6 +719,7 @@ echo -e " - Postgres Admin ('postgres'):   ${YELLOW}$DB_ADMIN_PASS${NC}"
 echo -e " - Datenbank-User ($DB_USER):   ${YELLOW}$DB_PASS${NC}"
 echo -e " - N8N_ENCRYPTION_KEY:            ${YELLOW}$N8N_ENCRYPTION_KEY${NC}"
 echo " - Datenbank-Name:      $DB_NAME"
+echo -e " - CrewAI-Serviceuser: ${YELLOW}$AGENT_USER${NC} (unprivilegiert, kein Login)"
 echo "----------------------------------------------------------"
 echo -e "${RED}ACHTUNG: Diese Passwörter stehen jetzt im Terminal-Scrollback"
 echo "und in Logs, falls die Ausgabe umgeleitet wurde. Bewahre die"
@@ -564,11 +735,13 @@ echo "    (n8n lauscht bewusst nur auf 127.0.0.1 — ohne Proxy kein Zugriff)"
 echo "----------------------------------------------------------"
 echo -e " ${YELLOW}ERFORDERLICH FÜR DEN CREWAI-SERVICE:${NC}"
 echo -e " ${YELLOW}Ohne eingetragenen API-Key liefert /run-agent einen 500er.${NC}"
-echo " Erstelle die .env aus der Vorlage und beschränke sie auf root:"
+echo " Erstelle die .env aus der Vorlage und gib sie dem Dienstuser:"
 echo -e "   ${GREEN}cp $AGENT_DIR/.env.example $AGENT_DIR/.env${NC}"
 echo -e "   ${GREEN}nano $AGENT_DIR/.env${NC}"
-echo -e "   ${GREEN}chmod 600 $AGENT_DIR/.env${NC}"
-echo " Danach: systemctl restart crewai"
+echo -e "   ${GREEN}chown root:$AGENT_GROUP $AGENT_DIR/.env${NC}"
+echo -e "   ${GREEN}chmod 640 $AGENT_DIR/.env${NC}"
+echo " Die Gruppe $AGENT_GROUP muss die Datei lesen können — deshalb 640"
+echo " und nicht 600. Danach: systemctl restart crewai"
 echo " Test:   curl -sX POST http://127.0.0.1:$CREWAI_PORT/run-agent \\"
 echo "           -H 'Content-Type: application/json' \\"
 echo "           -d '{\"topic\":\"Vorteile von n8n\"}'"

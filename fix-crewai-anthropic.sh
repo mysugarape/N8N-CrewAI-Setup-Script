@@ -25,6 +25,9 @@ UVICORN_VERSION="0.53.0"
 
 OLD_DIR="/var/www/agent_service"
 AGENT_DIR="/opt/agent_service"
+AGENT_USER="crewai"
+AGENT_GROUP="crewai"
+STATE_DIR="/var/lib/crewai"
 UNIT="/etc/systemd/system/crewai.service"
 
 RED='\033[0;31m'
@@ -111,7 +114,26 @@ else
 fi
 
 # ---------- Neu aufbauen ---------------------------------------
-echo -e "\n=== 1. Verzeichnis und venv anlegen ==="
+echo -e "\n=== 1. Verzeichnis, Systemuser und venv anlegen ==="
+
+# Eigener unprivilegierter Systemuser statt root. Der FastAPI-Server
+# führt von LLM-Agenten erzeugten Code aus — crewai interpretiert
+# Modell-Ausgaben als Anweisungen. Als root war jeder Modell-Fehler
+# ein Root-Fehler auf dem Host.
+if ! getent group "$AGENT_GROUP" >/dev/null; then
+    groupadd --system "$AGENT_GROUP"
+    echo "✓ Gruppe $AGENT_GROUP angelegt"
+fi
+if ! id -u "$AGENT_USER" >/dev/null 2>&1; then
+    useradd --system --gid "$AGENT_GROUP" --no-create-home \
+            --shell /usr/sbin/nologin \
+            --home-dir "$AGENT_DIR" --comment "CrewAI Agent Service" \
+            "$AGENT_USER"
+    echo "✓ Systemuser $AGENT_USER angelegt"
+else
+    echo "✓ Systemuser $AGENT_USER existiert bereits"
+fi
+
 mkdir -p "$AGENT_DIR"
 cd "$AGENT_DIR"
 
@@ -130,7 +152,9 @@ echo -e "\n=== 2. Abhängigkeiten installieren ==="
 # ---------- .env.example ----------------------------------------
 echo -e "\n=== 3. .env.example schreiben ==="
 cat << 'EOF' > "$AGENT_DIR/.env.example"
-# Anthropic-Zugang — von Hand ausfüllen, danach chmod 600 setzen.
+# Anthropic-Zugang — von Hand ausfüllen. Rechte danach auf
+# root:crewai 640 setzen: der Dienst läuft als Systemuser crewai und
+# muss die Datei über die Gruppe lesen können.
 ANTHROPIC_API_KEY=sk-ant-hier-eintragen
 
 # Modell. Der Provider-Präfix "anthropic/" ist bei crewai Pflicht.
@@ -152,8 +176,27 @@ else
     cp "$AGENT_DIR/.env.example" "$AGENT_DIR/.env"
     echo "✓ .env aus Vorlage erstellt"
 fi
-chmod 600 "$AGENT_DIR/.env"
 
+# ---------- Rechte ---------------------------------------------
+# Zwei Ziele im Widerspruch: der Dienst (als crewai) muss den API-Key
+# lesen können, und der Key darf für keine anderen lokalen Benutzer
+# lesbar sein. Gruppenbesitz löst beides — root:crewai mit 640 heißt
+# "root darf alles, die Gruppe crewai darf lesen, sonst niemand".
+#
+# 600 wäre hier falsch: der Dienst liefe als crewai und käme nicht mehr
+# an die Datei.
+chown -R root:root "$AGENT_DIR"
+chmod 755 "$AGENT_DIR"
+chown root:"$AGENT_GROUP" "$AGENT_DIR/.env"
+chmod 640 "$AGENT_DIR/.env"
+chown root:root "$AGENT_DIR/main.py"
+chmod 644 "$AGENT_DIR/main.py"
+
+mkdir -p "$STATE_DIR"
+chown "$AGENT_USER:$AGENT_GROUP" "$STATE_DIR"
+chmod 750 "$STATE_DIR"
+
+# ---------- API-Key prüfen ------------------------------------
 # Drei Zustände unterscheiden, nicht zwei: fehlender Key, leerer Wert
 # und der Platzhalter aus der Vorlage fuehren alle zum 500er, sind
 # aber unterschiedliche Fehler. Der Platzhalter wird bewusst NICHT
@@ -188,6 +231,16 @@ from pydantic import BaseModel
 # WorkingDirectory=AGENT_DIR, aber ein manueller Aufruf aus einem
 # anderen Verzeichnis würde die .env sonst nicht finden.
 load_dotenv(Path(__file__).resolve().parent / ".env")
+
+# crewai legt seinen SQLite-Speicher über appdirs unter
+# ~/.local/share/<projektname> an und ruft dabei mkdir auf. Der Dienst
+# läuft als unprivilegierter Systemuser ohne beschreibbares Home —
+# ohne dieses Verzeichnis scheitert der Start. Der Pfad ist in der
+# systemd-Unit über ReadWritePaths freigegeben.
+#
+# setdefault, nicht hart setzen: ein Betreiber kann den Wert in der .env
+# überschreiben, und der Default greift nur, wenn er fehlt.
+os.environ.setdefault("CREWAI_STORAGE_DIR", "/var/lib/crewai")
 
 app = FastAPI()
 
@@ -261,8 +314,10 @@ EOF
 
 # ---------- systemd-Unit ----------------------------------------
 echo -e "\n=== 5. systemd-Unit aktualisieren ==="
-# User=root bleibt unverändert — das ist der bekannte schwächste
-# Punkt dieses Setups (siehe setup.sh). Hier nur die Pfade korrigiert.
+# User=root ist hier durch den Systemuser crewai ersetzt. Die Härtung
+# begrenzt die Folgen, wenn ein manipulierter Prompt oder ein Bug im
+# Modell Code ausführt — sie ist keine echte Sandbox, aber ein
+# sinnvoller Rahmen.
 cat << EOF > "$UNIT"
 [Unit]
 Description=CrewAI FastAPI Service
@@ -270,11 +325,25 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=root
+User=$AGENT_USER
+Group=$AGENT_GROUP
 WorkingDirectory=$AGENT_DIR
 ExecStart=$AGENT_DIR/venv/bin/uvicorn main:app --host 127.0.0.1 --port $CREWAI_PORT
 Restart=always
 RestartSec=5
+
+# --- Härtung ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=$STATE_DIR
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target
@@ -352,7 +421,9 @@ echo -e "${GREEN} UMSTELLUNG ABGESCHLOSSEN                                ${NC}"
 echo -e "${GREEN}==========================================================${NC}"
 echo " - Projektordner:  $AGENT_DIR"
 echo " - venv:           $AGENT_DIR/venv"
-echo " - .env:           $AGENT_DIR/.env (chmod 600)"
+echo " - .env:           $AGENT_DIR/.env (root:crewai 640)"
+echo " - Serviceuser:    $AGENT_USER (unprivilegiert, kein Login)"
+echo " - State-Dir:      $STATE_DIR"
 echo " - Endpoint:       http://127.0.0.1:$CREWAI_PORT"
 echo " - Backup:         $BACKUP_DIR"
 echo "----------------------------------------------------------"

@@ -14,6 +14,7 @@ Repository: [github.com/mysugarape/N8N-CrewAI-Setup-Script](https://github.com/m
 - [Was das Skript macht](#was-das-skript-macht)
 - [Voraussetzungen](#voraussetzungen)
 - [Installation](#installation)
+  - [5. API-Key eintragen (Pflicht)](#5-api-key-eintragen-pflicht)
 - [Bestehende Installation auf Anthropic umstellen](#bestehende-installation-auf-anthropic-umstellen)
 - [Nach der Installation: manuelle Schritte in aaPanel](#nach-der-installation-manuelle-schritte-in-aapanel)
 - [Zugangsdaten](#zugangsdaten)
@@ -49,8 +50,15 @@ Das Skript führt sieben Schritte in einer durchgehenden, fehlertoleranten Sessi
 /opt/agent_service/main.py                 Beispiel-API mit einem CrewAI-Agenten
 /opt/agent_service/.env.example            Vorlage für API-Key und Modell
 /opt/agent_service/venv/                    Python-virtualenv
+/var/lib/crewai/                           Schreibbare Daten des Dienstes (SQLite)
 /root/n8n/ecosystem.config.cjs             PM2-Konfiguration mit allen n8n-Variablen
 /root/n8n-setup-credentials.txt            Zugangsdaten (nur für root lesbar)
+```
+
+Dazu ein unprivilegierter Systemuser `crewai` (UID aus dem System-Bereich, keine Login-Shell), unter dem der Agent-Service läuft. Er ist im Gegensatz zu root nicht interaktiv nutzbar:
+
+```bash
+id crewai          # uid=..., no-create-home, shell /usr/sbin/nologin
 ```
 
 > **Warum `/opt` und nicht `/var/www`:** `/var/www` ist in aaPanel der typische Website-Root. Eine `.env` mit dem API-Key läge dort im Webroot und wäre als Klartext auslieferbar. `/opt` liegt außerhalb und ist FHS-konform für Dienste.
@@ -137,6 +145,15 @@ GENERIERTE PASSWÖRTER — bitte sicher verwahren:
  - Datenbank-User (n8n_db):   <generiertes Passwort>
  - N8N_ENCRYPTION_KEY:            <generierter Schlüssel>
  - Datenbank-Name:      n8n_db
+ - CrewAI-Serviceuser: crewai (unprivilegiert, kein Login)
+----------------------------------------------------------
+ERFORDERLICH FÜR DEN CREWAI-SERVICE:
+Ohne eingetragenen API-Key liefert /run-agent einen 500er.
+   cp /opt/agent_service/.env.example /opt/agent_service/.env
+   nano /opt/agent_service/.env
+   chown root:crewai /opt/agent_service/.env
+   chmod 640 /opt/agent_service/.env
+   systemctl restart crewai
 ----------------------------------------------------------
 ACHTUNG: Diese Passwörter stehen jetzt im Terminal-Scrollback
 und in Logs, falls die Ausgabe umgeleitet wurde. Bewahre die
@@ -146,6 +163,40 @@ Credentials-Datei sicher auf und lösche sie nicht:
 ```
 
 *(Die npm-Version hängt von der zum Installationszeitpunkt verfügbaren npm-10-Release ab und kann variieren. Die Passwörter sind hier nur als Platzhalter dargestellt.)*
+
+### 5. API-Key eintragen (Pflicht)
+
+Das Setup ist danach **vollständig**, aber der Agent-Dienst kann noch keine Anfragen beantworten. Das Skript legt absichtlich nur eine Vorlage an — ein im Quelltext hinterlegter Key würde beim nächsten Commit dauerhaft in der Git-Historie landen.
+
+```bash
+cp /opt/agent_service/.env.example /opt/agent_service/.env
+nano /opt/agent_service/.env                 # ANTHROPIC_API_KEY=sk-ant-...
+chown root:crewai /opt/agent_service/.env    # Gruppe der Dienst muss lesen können
+chmod 640 /opt/agent_service/.env            # NICHT 600 — siehe Erklärung
+sudo systemctl restart crewai
+```
+
+> **Warum `640` und nicht `600`:** Der Dienst läuft als Systemuser `crewai`, nicht als root. Bei `600` mit Besitzer root käme er nicht mehr an den Key und jeder Request liefe in einen 500er. `root:crewai 640` bedeutet: root darf alles, die Gruppe `crewai` darf lesen, alle anderen Benutzer des Servers nicht.
+
+Prüfen, ohne den Key auszugeben:
+
+```bash
+cd /opt/agent_service && ./venv/bin/python -c "
+import main, os
+k = os.getenv('ANTHROPIC_API_KEY') or ''
+print('Key gesetzt:', bool(k))
+print('Platzhalter:', k == 'sk-ant-hier-eintragen')
+print('Modell:     ', main._build_llm().model)
+"
+```
+
+Danach der erste echte Lauf (kostet Tokens):
+
+```bash
+curl -sX POST http://127.0.0.1:8000/run-agent \
+  -H 'Content-Type: application/json' \
+  -d '{"topic":"Vorteile von n8n"}' | python3 -m json.tool
+```
 
 ---
 
@@ -173,7 +224,8 @@ Danach wie bei einem frischen Setup:
 
 ```bash
 nano /opt/agent_service/.env          # Anthropic-Key eintragen
-chmod 600 /opt/agent_service/.env
+chown root:crewai /opt/agent_service/.env
+chmod 640 /opt/agent_service/.env     # NICHT 600 — der Dienst läuft als crewai
 sudo systemctl restart crewai
 ```
 
@@ -325,29 +377,28 @@ pm2 save                               # Aktuelle Prozessliste speichern
 sudo systemctl status crewai
 sudo systemctl restart crewai
 sudo journalctl -u crewai -f           # Live-Logs
+sudo systemctl cat crewai              # Unit inkl. Härtungsoptionen ansehen
+sudo systemctl show crewai --property=User   # muss crewai ergeben, nicht root
+id crewai                              # Rechte des Dienstusers prüfen
+ls -la /opt/agent_service/.env         # muss root:crewai 640 sein
 curl -sX POST http://127.0.0.1:8000/run-agent \
   -H 'Content-Type: application/json' \
   -d '{"topic":"Vorteile von n8n"}' | python3 -m json.tool
 ```
 
-### API-Key einrichten (erforderlich)
+### API-Key (Nachschlagewerk)
 
-Der CrewAI-Service braucht einen Anthropic-Key. Ohne ihn liefert `/run-agent` einen 500er. Das Skript legt nur eine Vorlage an, der Key wird bewusst nicht automatisch eingetragen — `setup.sh` ist ein versioniertes Repo-File, und ein im Quelltext hinterlegter Key landet beim nächsten Commit dauerhaft in der Git-Historie.
-
-```bash
-cp /opt/agent_service/.env.example /opt/agent_service/.env
-nano /opt/agent_service/.env          # ANTHROPIC_API_KEY=sk-ant-...
-chmod 600 /opt/agent_service/.env
-sudo systemctl restart crewai
-```
+Das Einrichten ist oben unter [Schritt 5](#5-api-key-eintragen-pflicht) beschrieben. Hier die Variablen und ihre Bedeutung:
 
 | Variable | Bedeutung |
 |----------|-----------|
-| `ANTHROPIC_API_KEY` | Anthropic-API-Key. Pflicht. |
-| `MODEL` | Modell-ID mit Provider-Präfix, z. B. `anthropic/claude-haiku-4-5`. Ohne Präfix fällt crewai auf LiteLLM zurück. |
+| `ANTHROPIC_API_KEY` | Anthropic-API-Key. Pflicht — ohne ihn liefert `/run-agent` einen 500er. |
+| `MODEL` | Modell-ID mit Provider-Präfix, z. B. `anthropic/claude-haiku-4-5`. Ohne Präfix fällt crewai auf LiteLLM zurück, das extra installiert werden müsste. |
 | `MAX_TOKENS` | Obergrenze der Antwort. Bei Anthropic ein Pflichtparameter; Haiku 4.5 lässt 64000 zu, Default hier 8192. |
 
-Die Antwort enthält `model` und einen `usage`-Block mit `prompt_tokens`, `completion_tokens` und `total_tokens`, damit sich die Kosten eines Laufs ablesen lassen.
+Die Datei muss `root:crewai 640` sein. Nach jeder Änderung an `.env` ein `systemctl restart crewai` — der laufende Prozess liest die Datei nur beim Start.
+
+Die Antwort auf `/run-agent` enthält `model` und einen `usage`-Block mit `prompt_tokens`, `completion_tokens` und `total_tokens`, damit sich die Kosten eines Laufs ablesen lassen.
 
 ### Datenbank
 
@@ -365,6 +416,18 @@ systemctl is-enabled pm2-root crewai postgresql
 
 Alle drei sollten `enabled` ausgeben.
 
+### Zustand nach einem Neustart prüfen
+
+Nach einem Reboot sollte alles von selbst wiederkommen:
+
+```bash
+systemctl status crewai --no-pager | head -3
+systemctl show crewai --property=User      # muss crewai sein, nicht root
+ss -ltn | grep 8000                        # muss lauschen
+```
+
+Der erste Start nach einem Reboot dauert länger als der Folgestart — der Import von crewai erzeugt dann zum ersten Mal die `.pyc`-Dateien. Rechne hier mit 10 bis 20 Sekunden.
+
 ---
 
 ## Sicherheitshinweise
@@ -377,14 +440,22 @@ Alle drei sollten `enabled` ausgeben.
 - ✅ Die Domain-Eingabe wird gegen ungültige Zeichen validiert
 - ✅ Alle Passwörter sind 32 Zeichen alphanumerisch und werden deterministisch generiert
 - ✅ SQL-Fehler führen zum Abbruch (`ON_ERROR_STOP=1`) statt zu einem stillen Weiterlaufen mit kaputter Datenbank
-- ✅ Der Anthropic-API-Key steht ausschliesslich in der `.env` unter `/opt/agent_service` (chmod 600, ausserhalb jedes Webroots) — nie im Quelltext und damit nie in der Git-Historie
+- ✅ Der Anthropic-API-Key steht ausschliesslich in der `.env` unter `/opt/agent_service` (ausserhalb jedes Webroots) — nie im Quelltext und damit nie in der Git-Historie
+- ✅ Der CrewAI-Service läuft als eigener unprivilegierter Systemuser `crewai` mit `/usr/sbin/nologin`, nicht als root
+- ✅ Die systemd-Unit nutzt `ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp` und weitere Härtungsoptionen; beschreibbar ist nur `/var/lib/crewai`
 
 ### Was du wissen solltest
 
-> **⚠️ Der CrewAI-Service läuft als `root`.**
-> Der FastAPI-Server führt von LLM-Agenten generierten Code aus. Jeder Fehler in crewai, jeder manipulierte Prompt wird damit zu einem Fehler mit Root-Rechten. Besser wäre ein dedizierter unprivilegierter Systemuser — das Skript kommentiert diese Stelle entsprechend.
+> **ℹ️ Der CrewAI-Service läuft als Systemuser `crewai`.**
+> Der FastAPI-Server führt von LLM-Agenten generierten Code aus — crewai interpretiert Modell-Ausgaben als Anweisungen. Deshalb läuft der Dienst nicht als root, sondern als eigener unprivilegierter Systemuser ohne Login-Shell. Die Unit setzt zusätzlich `ProtectSystem=strict` (nur `/var/lib/crewai` beschreibbar), `NoNewPrivileges`, `PrivateTmp` und `ProtectKernelTunables`.
 >
-> Die `.env` mit dem API-Key liegt unter `/opt/agent_service` und ist `chmod 600` — nur für root lesbar und nicht über den Web erreichbar. Das entschärft die Schlüsselfrage, nicht das Grundproblem des Root-Betriebs.
+> Das ist **Schadensbegrenzung, keine Sandbox**. Ein Fehler im Modell oder ein manipulierter Prompt kann den Dienst zum Absturz bringen und Daten unter `/var/lib/crewai` verändern — den Host und andere Dienste erreicht er damit nicht.
+>
+> n8n selbst läuft weiterhin über PM2 als root. Das ist eine bewusste Entscheidung des Setups: PM2 wird in [dieser Anleitung](https://docs.n8n.io/hosting/installation/npm/) für den Systemdienst verwendet und bringt kein eigenes Rechtekonzept mit. Für eine stärkere Isolierung wäre ein Container-Setup der nächste Schritt.
+>
+> Das ist Schadensbegrenzung, keine Sandbox. Ein Fehler im Modell kann den Dienst zum Absturz bringen, aber nicht mehr direkt den Host kompromittieren.
+>
+> Die `.env` mit dem API-Key liegt unter `/opt/agent_service` als `root:crewai` mit `640` — für root und die Dienstgruppe lesbar, für alle anderen nicht.
 
 > **⚠️ Es werden keine Firewall-Regeln gesetzt.**
 > Das Skript konfiguriert keine Firewall. Für einen Produktivbetrieb solltest du zusätzlich nur die nötigen Ports öffnen (22, 80, 443) und alle anderen schließen.
@@ -475,10 +546,13 @@ Auf btrfs und einigen XFS-Setups wird `fallocate` nicht unterstützt; das Skript
 
 ```
 .
-├── setup.sh       # Das Setup-Skript
-├── README.md      # Diese Datei
-└── .gitattributes # LF-Zeilenenden
+├── setup.sh                 # Das Setup-Skript für einen frischen Server
+├── fix-crewai-anthropic.sh  # Migration für bereits eingerichtete Server
+├── README.md                # Diese Datei
+└── .gitattributes           # LF-Zeilenenden
 ```
+
+`setup.sh` ist der Normalfall für eine Neuinstallation. `fix-crewai-anthropic.sh` wird nur gebraucht, wenn der Server mit einer älteren Fassung eingerichtet wurde — siehe [Bestehende Installation umstellen](#bestehende-installation-auf-anthropic-umstellen).
 
 ---
 
