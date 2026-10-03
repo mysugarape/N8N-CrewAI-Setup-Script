@@ -70,10 +70,30 @@ id crewai          # uid=..., no-create-home, shell /usr/sbin/nologin
 
 - **Operating system:** Debian 12 (Bookworm) — other distributions are not tested
 - **aaPanel:** must already be installed and running
+- **A domain or subdomain with a DNS record pointing at the server** — set up **at your domain provider**, not in aaPanel (see the note below)
 - **PostgreSQL Manager in aaPanel:** must be installed from aaPanel's App Store — **the manager only, not the database itself** (see the note below)
 - **Root privileges:** the script writes system files and starts services
 - **Network access** for `apt`, NodeSource and npm
 - **Roughly 10 GB of disk space** (swap, PostgreSQL, node modules, Python venv)
+
+### The domain and DNS
+
+The script asks for a subdomain and uses it for `N8N_EDITOR_BASE_URL`, `N8N_WEBHOOK_URL` and the printed URL. It does **not** register anything, and it does not touch DNS. That part happens at your domain provider, before or after the run.
+
+One record is all you need:
+
+| Field | Value |
+|-------|-------|
+| Type | `A` |
+| Name | the subdomain, e.g. `n8n` |
+| Value | the server's **public IPv4** |
+
+Notes that save time later:
+
+- **Propagation takes minutes to a few hours.** Check it before you start: `dig +short n8n.example.com` on any machine must return the server's IP. If it does not, Let's Encrypt will refuse to issue a certificate and n8n stays unreachable.
+- **Only the `A` record is needed.** No `AAAA` record unless the server actually has IPv6 — a wrong `AAAA` record makes some clients prefer IPv6 and then fail to connect.
+- **DNS is not a prerequisite for the script itself.** n8n and the CrewAI service start and run without it; only the reverse proxy and SSL need the name to resolve.
+- If you use Cloudflare, set the record to DNS-only (grey cloud) initially. Proxy mode interferes with the Let's Encrypt HTTP-01 challenge.
 
 ### PostgreSQL Manager via aaPanel
 
@@ -95,11 +115,14 @@ Before running the setup, install the **manager itself** under **aaPanel → App
 
 The installation has four phases: aaPanel, the script itself, the API key, and finally the manual steps in aaPanel. Do not skip ahead — the script checks phase 1 and aborts without it.
 
+> You need a subdomain for this, and DNS has to point at the server before you set up SSL. Details under [The domain and DNS](#the-domain-and-dns).
+
 ### Phase 1 — aaPanel (before running the script)
 
 1. Install aaPanel including its Nginx stack, and wait until the panel is reachable in the browser.
 2. Under **aaPanel → App Store → PostgreSQL Manager**, install the **manager only**. Do not install a PostgreSQL version and do not let it create a database.
 3. Leave the website, SSL and reverse proxy alone for now — that is phase 4.
+4. Optional, but do it before phase 4: create the `A` record for your subdomain at your domain provider and let it resolve to the server's public IPv4 — see [The domain and DNS](#the-domain-and-dns).
 
 ### Phase 2 — the script
 
