@@ -440,25 +440,25 @@ import asyncio
 import os
 from pathlib import Path
 
-from crewai import Agent, BaseLLM, Crew, LLM, Task
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from pydantic import BaseModel
 
-# Absoluter Pfad statt "load_dotenv()": uvicorn startet mit
-# WorkingDirectory=AGENT_DIR, aber ein manueller Aufruf aus einem
-# anderen Verzeichnis würde die .env sonst nicht finden.
-load_dotenv(Path(__file__).resolve().parent / ".env")
-
-# crewai legt seinen SQLite-Speicher über appdirs unter
-# ~/.local/share/<projektname> an und ruft dabei mkdir auf. Der Dienst
-# läuft als unprivilegierter Systemuser ohne beschreibbares Home —
-# ohne dieses Verzeichnis scheitert der Start. Der Pfad ist in der
-# systemd-Unit über ReadWritePaths freigegeben.
+# Beides MUSS vor "import crewai" passieren — nicht aus Kosmetik, sondern
+# weil crewai beim Import einen Pfad berechnet und sofort anlegt:
 #
-# setdefault, nicht hart setzen: ein Betreiber kann den Wert in der .env
-# überschreiben, und der Default greift nur, wenn er fehlt.
+#   crewai/rag/chromadb/constants.py: DEFAULT_STORAGE_PATH = db_storage_path()
+#
+# Der Aufruf landet über appdirs in $HOME/.local/share/<projektname> und
+# ruft dort mkdir auf. Ohne gesetztes CREWAI_STORAGE_DIR und ohne HOME
+# wird daraus ".local" relativ zum WorkingDirectory — also
+# /opt/agent_service/.local, und das ist unter ProtectSystem=strict
+# read-only. Der Prozess stirbt dann schon beim Import, lange bevor
+# uvicorn auf dem Port lauscht. Deshalb steht der Import bewusst unten.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 os.environ.setdefault("CREWAI_STORAGE_DIR", "/var/lib/crewai")
+
+from crewai import Agent, BaseLLM, Crew, LLM, Task  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 app = FastAPI()
 
@@ -575,6 +575,14 @@ WorkingDirectory=$AGENT_DIR
 ExecStart=$AGENT_DIR/venv/bin/uvicorn main:app --host 127.0.0.1 --port $CREWAI_PORT
 Restart=always
 RestartSec=5
+
+# Zweite Verteidigungslinie neben dem setdefault() in main.py. crewai
+# rechnet Speicherpfade schon beim Import aus; die Unit ist der einzige
+# Ort, der garantiert VOR dem Python-Prozess gilt. Ohne HOME fällt
+# appdirs auf einen Pfad relativ zum WorkingDirectory zurück, und der
+# ist unter ProtectSystem=strict nicht beschreibbar.
+Environment=CREWAI_STORAGE_DIR=$STATE_DIR
+Environment=HOME=$STATE_DIR
 
 # --- Härtung ---
 # Das ersetzt keine echte Sandbox, aber es begrenzt die Folgen, wenn
