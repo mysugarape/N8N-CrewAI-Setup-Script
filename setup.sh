@@ -348,7 +348,11 @@ echo "✓ n8n läuft (PID $N8N_PID)"
 # SCHRITT 6: CREWAI & FASTAPI SERVICE
 # ----------------------------------------------------------
 echo -e "\n=== 6. CrewAI & FastAPI installieren ==="
-AGENT_DIR="/var/www/agent_service"
+# /opt statt /var/www: /var/www ist typischer Website-Root in aaPanel.
+# Eine .env mit API-Key läge sonst potenziell im Webroot und wäre als
+# Klartext auslieferbar. /opt ist FHS-konform für Dienste und liegt
+# außerhalb jedes denkbaren nginx-Roots.
+AGENT_DIR="/opt/agent_service"
 mkdir -p "$AGENT_DIR"
 cd "$AGENT_DIR"
 
@@ -357,41 +361,121 @@ if [ ! -d "venv" ]; then
 fi
 
 "$AGENT_DIR/venv/bin/pip" install --upgrade --no-cache-dir pip
+# Das [anthropic]-Extra installiert das native Anthropic-SDK. Ohne es
+# fällt crewai auf LiteLLM zurück, was eine zusätzliche Abhängigkeit
+# und ein weiterer Fehlerpfad wäre.
 "$AGENT_DIR/venv/bin/pip" install --no-cache-dir \
-    "crewai==$CREWAI_VERSION" \
+    "crewai[anthropic]==$CREWAI_VERSION" \
     "fastapi==$FASTAPI_VERSION" \
-    "uvicorn==$UVICORN_VERSION"
+    "uvicorn==$UVICORN_VERSION" \
+    "python-dotenv"
 
+# Vorlage ohne Secret — geht ins Repo. Die echte .env entsteht manuell
+# (siehe Abschlussausgabe), damit der API-Key nie durch dieses Skript
+# läuft und damit schon gar nicht im Quelltext landen kann.
+cat << 'EOF' > "$AGENT_DIR/.env.example"
+# Anthropic-Zugang — von Hand ausfüllen, danach chmod 600 setzen.
+ANTHROPIC_API_KEY=sk-ant-hier-eintragen
+
+# Modell. Der Provider-Präfix "anthropic/" ist bei crewai Pflicht.
+MODEL=anthropic/claude-haiku-4-5
+
+# max_tokens ist bei Anthropic ein Pflichtparameter — ohne ihn wirft
+# crewai bereits beim Erstellen des LLM-Objekts. Wert ist die Obergrenze
+# der Antwort; Haiku 4.5 lässt 64000 zu.
+MAX_TOKENS=8192
+EOF
+
+# Der API-Key wird bewusst NICHT hier hinterlegt: main.py entsteht per
+# Heredoc aus diesem Skript, und setup.sh ist ein versioniertes Repo-File.
+# Ein im Code eingetragener Key landet beim nächsten Commit dauerhaft in
+# der Git-Historie und lässt sich nur durch Rotieren bei Anthropic
+# entfernen. load_dotenv() in main.py löst das ohne Umweg.
 cat << 'EOF' > "$AGENT_DIR/main.py"
+import asyncio
+import os
+from pathlib import Path
+
+from crewai import Agent, BaseLLM, Crew, LLM, Task
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
-from crewai import Agent, Task, Crew
+
+# Absoluter Pfad statt "load_dotenv()": uvicorn startet mit
+# WorkingDirectory=AGENT_DIR, aber ein manueller Aufruf aus einem
+# anderen Verzeichnis würde die .env sonst nicht finden.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 app = FastAPI()
+
 
 class AgentRequest(BaseModel):
     topic: str
 
+
+def _build_llm() -> BaseLLM:
+    # LLM.__new__ ist eine Factory: mit dem Präfix "anthropic/" gibt sie
+    # ein AnthropicCompletion zurück, nicht die LLM-Klasse selbst. Der
+    # Rückgabetyp ist darum BaseLLM. Ohne Präfig fällt crewai auf LiteLLM
+    # zurück, das extra installiert werden müsste.
+    return LLM(
+        # Provider-Präfix "anthropic/" muss erhalten bleiben — ohne ihn
+        # sucht crewai einen anderen Provider und rät.
+        model=os.getenv("MODEL", "anthropic/claude-haiku-4-5"),
+        api_key=os.getenv("ANTHROPIC_API_KEY"),
+        # Obergrenze der Antwort, nicht der Zielwert. Der Default 8192
+        # liegt unterhalb dessen, was Haiku 4.5 zulässt (64000).
+        max_tokens=int(os.getenv("MAX_TOKENS", "8192")),
+        temperature=0.3,
+    )
+
+
 @app.post("/run-agent")
 async def run_agent(data: AgentRequest):
+    llm = _build_llm()
+
     researcher = Agent(
-        role='Research Analyst',
-        goal=f'Recherchiere Informationen zu {data.topic}',
-        backstory='Du bist ein erfahrener Analyst.',
-        verbose=False
+        role="Research Analyst",
+        goal=f"Recherchiere Informationen zu {data.topic}",
+        backstory="Du bist ein erfahrener Analyst.",
+        # LLM am Agent statt am Crew: damit kann crewai nicht auf einen
+        # anderen Provider zurückfallen, wenn die .env fehlt.
+        llm=llm,
+        verbose=False,
     )
 
     task = Task(
-        description=f'Erstelle eine Zusammenfassung zu: {data.topic}',
-        expected_output='Ein prägnanter Text im Markdown-Format.',
-        agent=researcher
+        description=f"Erstelle eine Zusammenfassung zu: {data.topic}",
+        expected_output="Ein prägnanter Text im Markdown-Format.",
+        agent=researcher,
     )
 
     crew = Crew(agents=[researcher], tasks=[task])
-    result = crew.kickoff()
 
-    return {"status": "success", "result": str(result)}
+    # kickoff() ist blockierend und dauert je nach Modell mehrere
+    # Sekunden. Ohne Thread läuft die Anfrage synchron im Event-Loop
+    # und der FastAPI-Server ist währenddessen nicht responsiv.
+    result = await asyncio.to_thread(crew.kickoff)
+
+    # crew.usage_metrics ist selbst die UsageMetrics und vor kickoff None —
+    # result.token_usage hat dagegen eine default_factory und ist damit
+    # garantiert vorhanden. Anthropic rechnet Cache-Reads und -Writes
+    # bereits in prompt_tokens hinein, die nicht noch einmal addiert
+    # werden dürfen.
+    tokens = result.token_usage
+
+    return {
+        "status": "success",
+        "model": os.getenv("MODEL", "anthropic/claude-haiku-4-5"),
+        "result": str(result),
+        "usage": {
+            "prompt_tokens": tokens.prompt_tokens,
+            "completion_tokens": tokens.completion_tokens,
+            "total_tokens": tokens.total_tokens,
+        },
+    }
 EOF
+
 
 echo -e "\n=== 7. Systemd Service für CrewAI erstellen & starten ==="
 # ACHTUNG: User=root ist die schwächste Stelle dieses Setups.
@@ -477,4 +561,15 @@ echo " 1. Erstelle die Website '$DOMAIN' in aaPanel."
 echo " 2. Aktiviere SSL (Let's Encrypt) & Force HTTPS."
 echo " 3. Richte den Reverse Proxy ein auf: http://127.0.0.1:$N8N_PORT"
 echo "    (n8n lauscht bewusst nur auf 127.0.0.1 — ohne Proxy kein Zugriff)"
+echo "----------------------------------------------------------"
+echo -e " ${YELLOW}ERFORDERLICH FÜR DEN CREWAI-SERVICE:${NC}"
+echo -e " ${YELLOW}Ohne eingetragenen API-Key liefert /run-agent einen 500er.${NC}"
+echo " Erstelle die .env aus der Vorlage und beschränke sie auf root:"
+echo -e "   ${GREEN}cp $AGENT_DIR/.env.example $AGENT_DIR/.env${NC}"
+echo -e "   ${GREEN}nano $AGENT_DIR/.env${NC}"
+echo -e "   ${GREEN}chmod 600 $AGENT_DIR/.env${NC}"
+echo " Danach: systemctl restart crewai"
+echo " Test:   curl -sX POST http://127.0.0.1:$CREWAI_PORT/run-agent \\"
+echo "           -H 'Content-Type: application/json' \\"
+echo "           -d '{\"topic\":\"Vorteile von n8n\"}'"
 echo "=========================================================="

@@ -45,11 +45,14 @@ Das Skript führt sieben Schritte in einer durchgehenden, fehlertoleranten Sessi
 ```
 /swapfile                                  4 GB Swap
 /etc/systemd/system/crewai.service         systemd-Unit für den FastAPI-Service
-/var/www/agent_service/main.py             Beispiel-API mit einem CrewAI-Agenten
-/var/www/agent_service/venv/                Python-virtualenv
+/opt/agent_service/main.py                 Beispiel-API mit einem CrewAI-Agenten
+/opt/agent_service/.env.example            Vorlage für API-Key und Modell
+/opt/agent_service/venv/                    Python-virtualenv
 /root/n8n/ecosystem.config.cjs             PM2-Konfiguration mit allen n8n-Variablen
 /root/n8n-setup-credentials.txt            Zugangsdaten (nur für root lesbar)
 ```
+
+> **Warum `/opt` und nicht `/var/www`:** `/var/www` ist in aaPanel der typische Website-Root. Eine `.env` mit dem API-Key läge dort im Webroot und wäre als Klartext auslieferbar. `/opt` liegt außerhalb und ist FHS-konform für Dienste.
 
 ---
 
@@ -257,7 +260,7 @@ Beim ersten Start meldet n8n eine Reihe von Deprecation-Warnungen. Die wichtigst
 | `Failed to start Python task runner in internal mode` | Bekannter n8n-Bug bei npm-Installation ([n8n-io/n8n#31149](https://github.com/n8n-io/n8n/issues/31149)) | ⚠️ Bekannt, nicht behoben |
 | `Running n8n outside a container is deprecated` | Künftige Versionen verlangen Docker | ⚠️ Bewusste Entscheidung, siehe unten |
 
-**Zum Python-Runner:** Diese Meldung betrifft ausschließlich den **Python-Code-Node** in n8n selbst. Sie tritt auf, weil n8n bei einer npm-Installation kein eigenes venv mitbringt — das offizielle Docker-Image liefert es mit. Alles andere funktioniert normal. Der separate **CrewAI-Service** dieses Setups ist davon **nicht** betroffen; er hat sein eigenes venv unter `/var/www/agent_service/venv`.
+**Zum Python-Runner:** Diese Meldung betrifft ausschließlich den **Python-Code-Node** in n8n selbst. Sie tritt auf, weil n8n bei einer npm-Installation kein eigenes venv mitbringt — das offizielle Docker-Image liefert es mit. Alles andere funktioniert normal. Der separate **CrewAI-Service** dieses Setups ist davon **nicht** betroffen; er hat sein eigenes venv unter `/opt/agent_service/venv`.
 
 **Zur Container-Warnung:** n8n hat den Betrieb außerhalb von Docker als veraltet eingestuft und kündigt an, dass künftige Versionen das offizielle Docker-Image voraussetzen. Dieses Setup nutzt bewusst **PM2 statt Docker**. Aktuell läuft n8n 2.41.6 problem damit. Sollte eine künftige n8n-Version die Installation ohne Container verweigern, ist ein Umstieg auf Docker Compose der nächste Schritt — die gepinnte `N8N_VERSION` im Skript macht ein solches Update planbar.
 
@@ -282,10 +285,29 @@ pm2 save                               # Aktuelle Prozessliste speichern
 sudo systemctl status crewai
 sudo systemctl restart crewai
 sudo journalctl -u crewai -f           # Live-Logs
-curl -X POST http://127.0.0.1:8000/run-agent \
+curl -sX POST http://127.0.0.1:8000/run-agent \
   -H 'Content-Type: application/json' \
-  -d '{"topic":"Vorteile von n8n"}'
+  -d '{"topic":"Vorteile von n8n"}' | python -m json.tool
 ```
+
+### API-Key einrichten (erforderlich)
+
+Der CrewAI-Service braucht einen Anthropic-Key. Ohne ihn liefert `/run-agent` einen 500er. Das Skript legt nur eine Vorlage an, der Key wird bewusst nicht automatisch eingetragen — `setup.sh` ist ein versioniertes Repo-File, und ein im Quelltext hinterlegter Key landet beim nächsten Commit dauerhaft in der Git-Historie.
+
+```bash
+cp /opt/agent_service/.env.example /opt/agent_service/.env
+nano /opt/agent_service/.env          # ANTHROPIC_API_KEY=sk-ant-...
+chmod 600 /opt/agent_service/.env
+sudo systemctl restart crewai
+```
+
+| Variable | Bedeutung |
+|----------|-----------|
+| `ANTHROPIC_API_KEY` | Anthropic-API-Key. Pflicht. |
+| `MODEL` | Modell-ID mit Provider-Präfix, z. B. `anthropic/claude-haiku-4-5`. Ohne Präfix fällt crewai auf LiteLLM zurück. |
+| `MAX_TOKENS` | Obergrenze der Antwort. Bei Anthropic ein Pflichtparameter; Haiku 4.5 lässt 64000 zu, Default hier 8192. |
+
+Die Antwort enthält `model` und einen `usage`-Block mit `prompt_tokens`, `completion_tokens` und `total_tokens`, damit sich die Kosten eines Laufs ablesen lassen.
 
 ### Datenbank
 
@@ -315,11 +337,14 @@ Alle drei sollten `enabled` ausgeben.
 - ✅ Die Domain-Eingabe wird gegen ungültige Zeichen validiert
 - ✅ Alle Passwörter sind 32 Zeichen alphanumerisch und werden deterministisch generiert
 - ✅ SQL-Fehler führen zum Abbruch (`ON_ERROR_STOP=1`) statt zu einem stillen Weiterlaufen mit kaputter Datenbank
+- ✅ Der Anthropic-API-Key steht ausschliesslich in der `.env` unter `/opt/agent_service` (chmod 600, ausserhalb jedes Webroots) — nie im Quelltext und damit nie in der Git-Historie
 
 ### Was du wissen solltest
 
 > **⚠️ Der CrewAI-Service läuft als `root`.**
 > Der FastAPI-Server führt von LLM-Agenten generierten Code aus. Jeder Fehler in crewai, jeder manipulierte Prompt wird damit zu einem Fehler mit Root-Rechten. Besser wäre ein dedizierter unprivilegierter Systemuser — das Skript kommentiert diese Stelle entsprechend.
+>
+> Die `.env` mit dem API-Key liegt unter `/opt/agent_service` und ist `chmod 600` — nur für root lesbar und nicht über den Web erreichbar. Das entschärft die Schlüsselfrage, nicht das Grundproblem des Root-Betriebs.
 
 > **⚠️ Es werden keine Firewall-Regeln gesetzt.**
 > Das Skript konfiguriert keine Firewall. Für einen Produktivbetrieb solltest du zusätzlich nur die nötigen Ports öffnen (22, 80, 443) und alle anderen schließen.
