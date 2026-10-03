@@ -14,7 +14,9 @@ Repository: [github.com/mysugarape/N8N-CrewAI-Setup-Script](https://github.com/m
 - [What the script does](#what-the-script-does)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
-  - [5. Enter your API key (required)](#5-enter-your-api-key-required)
+  - [Phase 3 — three checks and one backup](#phase-3--three-checks-and-one-backup)
+  - [Phase 4 — Enter your API key (required)](#phase-4--enter-your-api-key-required)
+  - [If phase 7 aborts](#if-phase-7-aborts)
 - [Manual steps in aaPanel after installation](#manual-steps-in-aapanel-after-installation)
 - [Credentials](#credentials)
 - [Pinned versions](#pinned-versions)
@@ -91,16 +93,24 @@ Before running the setup, install the **manager itself** under **aaPanel → App
 
 ## Installation
 
-### 1. Clone the repository
+The installation has four phases: aaPanel, the script itself, the API key, and finally the manual steps in aaPanel. Do not skip ahead — the script checks phase 1 and aborts without it.
+
+### Phase 1 — aaPanel (before running the script)
+
+1. Install aaPanel including its Nginx stack, and wait until the panel is reachable in the browser.
+2. Under **aaPanel → App Store → PostgreSQL Manager**, install the **manager only**. Do not install a PostgreSQL version and do not let it create a database.
+3. Leave the website, SSL and reverse proxy alone for now — that is phase 4.
+
+### Phase 2 — the script
+
+#### 2.1 Clone the repository
 
 ```bash
 git clone https://github.com/mysugarape/N8N-CrewAI-Setup-Script.git
 cd N8N-CrewAI-Setup-Script
 ```
 
-> **Do this first:** make sure aaPanel is running and the **PostgreSQL Manager** is installed from the App Store (manager only, no database version — details under [Prerequisites](#prerequisites)).
-
-### 2. Run the script
+#### 2.2 Run it
 
 ```bash
 sudo bash setup.sh
@@ -117,11 +127,25 @@ The script is **fully interactive** and asks four questions:
 
 > **Tip:** every prompt can be confirmed with **Enter** to accept the default. The script also works without a TTY — missing input then falls back to the defaults (useful for CI).
 
-### 3. Duration
+#### 2.3 What happens while it runs
 
-Depending on server performance, installation takes **10 to 25 minutes**. The biggest time sinks are the download of the node modules and the compilation of the Python dependencies.
+| Output marker | What is going on |
+|---------------|------------------|
+| `1. Prüfung der Voraussetzungen` | Root check, tools, aaPanel and PostgreSQL Manager |
+| `2. System-Pakete, Swap & Node.js` | 4 GB swap, `apt`, Node.js LTS via NodeSource |
+| `3. PostgreSQL Admin-Passwort …` | Superuser password, database `n8n_db`, user, grants |
+| `4. PM2 & n8n (v2.41.6) installieren` | The longest step: full download of the node modules |
+| `5. n8n PM2 Service konfigurieren & starten` | `ecosystem.config.cjs`, PM2 process, autostart |
+| `6. CrewAI venv, FastAPI & systemd Service` | venv, `pip install crewai[anthropic]`, `main.py`, unit |
+| `7. Systemd Service für CrewAI erstellen & starten` | Start plus a wait loop for port 8000 |
 
-### 4. Result
+Expect **10 to 25 minutes** in total. The npm download and the compilation of the Python dependencies dominate.
+
+#### 2.4 The final verification
+
+Phase 7 does not simply trust `systemctl start`. It polls for up to 60 seconds until something listens on port 8000, and aborts if the service dies in the meantime — because `systemctl restart` exits 0 even when the process dies immediately afterwards. A successful run therefore means **both** services were verified, not merely started.
+
+#### 2.5 Result
 
 On success the script prints a summary:
 
@@ -164,7 +188,28 @@ credentials file safe and do not delete it:
 
 *(The npm version depends on the npm 10 release available at install time and may vary. The passwords are shown as placeholders here.)*
 
-### 5. Enter your API key (required)
+### Phase 3 — three checks and one backup
+
+Run these directly after the summary. Only the first one changes anything; the other two are verifications.
+
+```bash
+# 1. Copy the credentials out of /root — they are gone if the server is rebuilt
+cp /root/n8n-setup-credentials.txt ~/n8n-credentials-backup.txt
+
+# 2. Check: the .env must be root:crewai 640
+ls -la /opt/agent_service/.env
+
+# 3. Check: all three services must survive a reboot
+systemctl is-enabled crewai postgresql pm2-root
+```
+
+**Why each one matters**
+
+- **Backup** — the credentials live only under `/root`. That directory does not survive a reinstall, and `N8N_ENCRYPTION_KEY` cannot be recovered anywhere else. Keep the copy outside the server as well.
+- **`.env` rights** — with `600` and owner root the service, running as `crewai`, can no longer read the key and every request fails with a 500.
+- **`is-enabled`** — if any of the three prints `disabled`, nothing comes back after a reboot. Fix with `systemctl enable <name>`.
+
+### Phase 4 — Enter your API key (required)
 
 The setup is **complete** at this point, but the agent service cannot answer any request yet. The script deliberately only writes a template — an API key committed to the source would end up permanently in the git history.
 
@@ -178,7 +223,14 @@ sudo systemctl restart crewai
 
 > **Why `640` and not `600`:** the service runs as the system user `crewai`, not as root. With `600` and owner root it would no longer reach the key, and every request would fail with a 500. `root:crewai 640` means: root may do anything, the `crewai` group may read, and no other user on the server may.
 
-Verify without printing the key:
+Confirm the service came back up before you spend tokens:
+
+```bash
+systemctl is-active crewai
+ss -ltn | grep :8000
+```
+
+Verify the key without printing it:
 
 ```bash
 cd /opt/agent_service && ./venv/bin/python -c "
@@ -190,13 +242,52 @@ print('Model:     ', main._build_llm().model)
 "
 ```
 
-Then the first real run (costs tokens):
+Then the first real run (costs tokens). The first request takes **30 to 90 seconds** — the model is cold and the `.pyc` files are generated on the fly. Do not cancel it:
 
 ```bash
 curl -sX POST http://127.0.0.1:8000/run-agent \
   -H 'Content-Type: application/json' \
   -d '{"topic":"Advantages of n8n"}' | python3 -m json.tool
 ```
+
+A correct response looks like this:
+
+```json
+{
+    "status": "success",
+    "model": "anthropic/claude-haiku-4-5",
+    "result": "n8n is a workflow automation tool ...",
+    "usage": {
+        "prompt_tokens": 1234,
+        "completion_tokens": 456,
+        "total_tokens": 1690
+    }
+}
+```
+
+`usage.total_tokens` must be **greater than 0**. If `result` contains text but the token count is 0, the agent never actually ran.
+
+### If phase 7 aborts
+
+```
+[ABBRUCH] Der CrewAI-Service lauscht nicht auf Port 8000.
+```
+
+This is the verification working as intended — it reports a real failure instead of a false success. n8n and PostgreSQL are already running at that point and are not affected. Get the actual error first:
+
+```bash
+journalctl -u crewai -n 40 --no-pager
+```
+
+To determine whether the code or the unit is at fault, start the service outside systemd:
+
+```bash
+cd /opt/agent_service
+sudo -u crewai env HOME=/var/lib/crewai \
+  ./venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+If that works, the unit's sandboxing is too strict — the known case is crewai's storage path. The unit handles it with `Environment=CREWAI_STORAGE_DIR` and `Environment=HOME`; if those are missing from your unit, add them via `systemctl edit crewai`.
 
 ---
 
@@ -348,7 +439,7 @@ curl -sX POST http://127.0.0.1:8000/run-agent \
 
 ### API key (quick reference)
 
-How to set it up is described above under [Step 5](#5-enter-your-api-key-required). Here are the variables and what they mean:
+How to set it up is described above under [Phase 4](#phase-4--enter-your-api-key-required). Here are the variables and what they mean:
 
 | Variable | Meaning |
 |----------|---------|
