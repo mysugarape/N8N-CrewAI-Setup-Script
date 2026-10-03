@@ -419,7 +419,7 @@ cat << 'EOF' > "$AGENT_DIR/.env.example"
 # Anthropic-Zugang — von Hand ausfüllen. Rechte danach auf
 # root:crewai 640 setzen: der Dienst läuft als Systemuser crewai und
 # muss die Datei über die Gruppe lesen können.
-ANTHROPIC_API_KEY=sk-ant-hier-eintragen
+ANTHROPIC_API_KEY=sk-ant-enter-key-here
 
 # Modell. Der Provider-Präfix "anthropic/" ist bei crewai Pflicht.
 MODEL=anthropic/claude-haiku-4-5

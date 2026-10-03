@@ -1,6 +1,6 @@
-# n8n & CrewAI Setup-Skript (Debian 12 / aaPanel)
+# n8n & CrewAI Setup Script (Debian 12 / aaPanel)
 
-Ein interaktives, idempotentes Bash-Skript, das auf einem **Debian 12**-Server mit **aaPanel** eine vollständige n8n-Installation mit PostgreSQL-Datenbank sowie einen CrewAI/FastAPI-Microservice einrichtet — beides über systemd bzw. PM2 dauerhaft im Autostart.
+An interactive, idempotent Bash script that sets up a complete n8n installation with a PostgreSQL database as well as a CrewAI/FastAPI microservice on a **Debian 12** server running **aaPanel** — both kept alive across reboots via systemd and PM2 respectively.
 
 [![Shell](https://img.shields.io/badge/shell-bash-blue.svg)](https://www.gnu.org/software/bash/)
 [![Debian](https://img.shields.io/badge/debian-12-red.svg)](https://www.debian.org/)
@@ -9,253 +9,254 @@ Repository: [github.com/mysugarape/N8N-CrewAI-Setup-Script](https://github.com/m
 
 ---
 
-## Inhalt
+## Contents
 
-- [Was das Skript macht](#was-das-skript-macht)
-- [Voraussetzungen](#voraussetzungen)
+- [What the script does](#what-the-script-does)
+- [Prerequisites](#prerequisites)
 - [Installation](#installation)
-  - [5. API-Key eintragen (Pflicht)](#5-api-key-eintragen-pflicht)
-- [Nach der Installation: manuelle Schritte in aaPanel](#nach-der-installation-manuelle-schritte-in-aapanel)
-- [Zugangsdaten](#zugangsdaten)
-- [Gepinnte Versionen](#gepinnte-versionen)
-- [Wichtige Umgebungsvariablen](#wichtige-umgebungsvariablen)
-- [Befehle für den Alltag](#befehle-für-den-alltag)
-- [Sicherheitshinweise](#sicherheitshinweise)
-- [Verhalten bei erneutem Lauf](#verhalten-bei-erneutem-lauf)
-- [Fehlerbehebung](#fehlerbehebung)
-- [Projektstruktur](#projektstruktur)
+  - [5. Enter your API key (required)](#5-enter-your-api-key-required)
+- [Manual steps in aaPanel after installation](#manual-steps-in-aapanel-after-installation)
+- [Credentials](#credentials)
+- [Pinned versions](#pinned-versions)
+- [Important environment variables](#important-environment-variables)
+- [Day-to-day commands](#day-to-day-commands)
+- [Security notes](#security-notes)
+- [Behaviour on a re-run](#behaviour-on-a-re-run)
+- [Troubleshooting](#troubleshooting)
+- [Project structure](#project-structure)
 
 ---
 
-## Was das Skript macht
+## What the script does
 
-Das Skript führt sieben Schritte in einer durchgehenden, fehlertoleranten Session aus:
+The script runs seven steps in one continuous, error-tolerant session:
 
-| Schritt | Inhalt |
-|---------|--------|
-| **1. Pre-Check** | Prüft Root-Rechte, benötigte Werkzeuge (`openssl`, `curl`) und fragt ab, ob aaPanel sowie der PostgreSQL-Manager bereits laufen |
-| **2. Konfiguration** | Fragt die Subdomain ab, generiert Passwörter und den `N8N_ENCRYPTION_KEY` |
-| **3. System** | Richtet 4 GB Swap ein, installiert Systempakete, PostgreSQL, Node.js LTS und Python3 |
-| **4. Datenbank** | Setzt das PostgreSQL-Superuser-Passwort und legt Datenbank, User und Rechte an |
-| **5. n8n** | Installiert n8n, schreibt eine PM2-Ecosystem-Datei, startet den Dienst und richtet den Reboot-Autostart ein |
-| **6. CrewAI** | Erstellt ein venv, installiert CrewAI/FastAPI/uvicorn, schreibt eine Beispiel-API und registriert sie als systemd-Service |
-| **7. Abschluss** | Schreibt alle Zugangsdaten in eine root-only-Datei und fasst die Versionen zusammen |
+| Step | Content |
+|------|---------|
+| **1. Pre-check** | Verifies root privileges and required tools (`openssl`, `curl`), then asks whether aaPanel and the PostgreSQL Manager are already present |
+| **2. Configuration** | Asks for the subdomain, generates passwords and the `N8N_ENCRYPTION_KEY` |
+| **3. System** | Sets up 4 GB of swap, installs system packages, PostgreSQL, Node.js LTS and Python 3 |
+| **4. Database** | Sets the PostgreSQL superuser password and creates the database, user and grants |
+| **5. n8n** | Installs n8n, writes a PM2 ecosystem file, starts the service and enables autostart on boot |
+| **6. CrewAI** | Creates a venv, installs CrewAI/FastAPI/uvicorn, writes a sample API and registers it as a systemd service |
+| **7. Summary** | Writes all credentials to a root-only file and lists the versions |
 
-### Konfigurationsdateien, die das Skript anlegt
+### Configuration files created by the script
 
 ```
-/swapfile                                  4 GB Swap
-/etc/systemd/system/crewai.service         systemd-Unit für den FastAPI-Service
-/opt/agent_service/main.py                 Beispiel-API mit einem CrewAI-Agenten
-/opt/agent_service/.env.example            Vorlage für API-Key und Modell
-/opt/agent_service/venv/                    Python-virtualenv
-/var/lib/crewai/                           Schreibbare Daten des Dienstes (SQLite)
-/root/n8n/ecosystem.config.cjs             PM2-Konfiguration mit allen n8n-Variablen
-/root/n8n-setup-credentials.txt            Zugangsdaten (nur für root lesbar)
+/swapfile                                  4 GB of swap
+/etc/systemd/system/crewai.service         systemd unit for the FastAPI service
+/opt/agent_service/main.py                 sample API with one CrewAI agent
+/opt/agent_service/.env.example            template for API key and model
+/opt/agent_service/venv/                    Python virtualenv
+/var/lib/crewai/                           writable service data (SQLite)
+/root/n8n/ecosystem.config.cjs             PM2 config with all n8n variables
+/root/n8n-setup-credentials.txt            credentials (readable by root only)
 ```
 
-Dazu ein unprivilegierter Systemuser `crewai` (UID aus dem System-Bereich, keine Login-Shell), unter dem der Agent-Service läuft. Er ist im Gegensatz zu root nicht interaktiv nutzbar:
+In addition, an unprivileged system user `crewai` is created (UID from the system range, no login shell), and the agent service runs as that user. Unlike root, it cannot be used interactively:
 
 ```bash
 id crewai          # uid=..., no-create-home, shell /usr/sbin/nologin
 ```
 
-> **Warum `/opt` und nicht `/var/www`:** `/var/www` ist in aaPanel der typische Website-Root. Eine `.env` mit dem API-Key läge dort im Webroot und wäre als Klartext auslieferbar. `/opt` liegt außerhalb und ist FHS-konform für Dienste.
+> **Why `/opt` and not `/var/www`:** `/var/www` is aaPanel's typical website root. A `.env` holding the API key would sit inside the web root and could be served as plaintext. `/opt` lives outside it and is FHS-conformant for services.
 
 ---
 
-## Voraussetzungen
+## Prerequisites
 
-- **Betriebssystem:** Debian 12 (Bookworm) — andere Distributionen werden nicht getestet
-- **aaPanel:** muss bereits installiert und laufend sein
-- **PostgreSQL-Manager in aaPanel:** muss über den App-Store von aaPanel installiert sein — **nur der Manager, nicht die Datenbank selbst** (siehe Hinweis unten)
-- **Root-Rechte:** das Skript legt Systemdateien an und startet Dienste
-- **Netzwerkzugriff** für `apt`, NodeSource und npm
-- **Fester Speicherplatz** von ca. 10 GB (Swap, PostgreSQL, Node-Module, Python-venv)
+- **Operating system:** Debian 12 (Bookworm) — other distributions are not tested
+- **aaPanel:** must already be installed and running
+- **PostgreSQL Manager in aaPanel:** must be installed from aaPanel's App Store — **the manager only, not the database itself** (see the note below)
+- **Root privileges:** the script writes system files and starts services
+- **Network access** for `apt`, NodeSource and npm
+- **Roughly 10 GB of disk space** (swap, PostgreSQL, node modules, Python venv)
 
-### PostgreSQL-Manager über aaPanel
+### PostgreSQL Manager via aaPanel
 
-Installiere vor dem Setup unter **aaPanel → App-Store → PostgreSQL Manager** den **Manager selbst**. Wähle dabei **keine** PostgreSQL-Version aus und lass keine Datenbank anlegen — das Skript erledigt beides anschließend selbst:
+Before running the setup, install the **manager itself** under **aaPanel → App Store → PostgreSQL Manager**. Do **not** pick a PostgreSQL version and do not let it create a database — the script does both afterwards:
 
-- den PostgreSQL-Server per `apt-get install postgresql`
-- das Passwort des Superusers `postgres`
-- die Datenbank `n8n_db`, den User `n8n_db` und dessen Rechte
+- installing the PostgreSQL server via `apt-get install postgresql`
+- setting the password of the superuser `postgres`
+- creating the database `n8n_db`, the user `n8n_db` and its grants
 
-> **Warum nur der Manager?** Wenn du im App-Store eine PostgreSQL-Version installierst, legt aaPanel eine eigene, abweichende Installation an. Das Skript würde dann `systemctl enable --now postgresql` auf einen Dienst anwenden, den aaPanel verwaltet — die Konfigurationen laufen auseinander. Installierst du nur den Manager, bleibt aaPanel die Verwaltungsoberfläche, der eigentliche Server stammt aber aus dem Skript.
+> **Why only the manager?** If you install a PostgreSQL version from the App Store, aaPanel sets up its own, divergent installation. The script would then run `systemctl enable --now postgresql` against a service that aaPanel manages, and the two configurations drift apart. Installing only the manager keeps aaPanel as the administrative front end while the actual server comes from the script.
 >
-> **Nach der Installation:** Der Manager in aaPanel kann nach dem Setup genutzt werden, um die Datenbank zu verwalten, Backups zu erstellen und Logs einzusehen. Damit der Dienst weiterhin von systemd und nicht von aaPanel gesteuert wird, ändere nichts an der PostgreSQL-Version im App-Store.
+> **After installation:** the manager in aaPanel can be used to manage the database, create backups and inspect logs. To keep the service under systemd rather than aaPanel, do not change the PostgreSQL version in the App Store.
 
-> **Hinweis:** Bei einem frischen Debian 12 mit weniger als 4 GB RAM ist die Swap-Datei Pflicht, da PostgreSQL und n8n sonst beim Start in den OOM-Killer laufen.
+> **Note:** on a fresh Debian 12 with less than 4 GB of RAM the swap file is mandatory, because PostgreSQL and n8n otherwise end up in the OOM killer during startup.
 
 ---
 
 ## Installation
 
-### 1. Repository klonen
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/mysugarape/N8N-CrewAI-Setup-Script.git
 cd N8N-CrewAI-Setup-Script
 ```
 
-> **Vorher erledigen:** Stelle sicher, dass aaPanel läuft und der **PostgreSQL-Manager** über den App-Store installiert ist (nur der Manager, keine Datenbank-Version — Details unter [Voraussetzungen](#voraussetzungen)).
+> **Do this first:** make sure aaPanel is running and the **PostgreSQL Manager** is installed from the App Store (manager only, no database version — details under [Prerequisites](#prerequisites)).
 
-### 2. Skript ausführen
+### 2. Run the script
 
 ```bash
 sudo bash setup.sh
 ```
-Das Skript ist **vollständig interaktiv** und führt durch vier Abfragen:
+
+The script is **fully interactive** and asks four questions:
 
 ```
-1. Ist aaPanel auf diesem Server bereits fertig installiert? (y/n) [n]:
-2. Ist der PostgreSQL-Manager in aaPanel installiert? (nur der Manager) (y/n) [y]:
-   → Domain-Abfrage:  Subdomain für n8n [Standard: n8n.formhabr.com]:
-   → Bestätigung:     Möchtest du die Installation jetzt starten? (y/n) [y]:
+1. Is aaPanel already fully installed on this server? (y/n) [n]:
+2. Is the PostgreSQL Manager installed in aaPanel? (manager only) (y/n) [y]:
+   → domain prompt:    Subdomain for n8n [default: n8n.formhabr.com]:
+   → confirmation:    Do you want to start the installation now? (y/n) [y]:
 ```
 
-> **Tipp:** Jede Eingabe kann mit **Enter** bestätigt werden, um den Standard zu übernehmen. Das Skript funktioniert auch ohne TTY — fehlende Eingaben fallen dann auf die Standardwerte zurück (nützlich für CI).
+> **Tip:** every prompt can be confirmed with **Enter** to accept the default. The script also works without a TTY — missing input then falls back to the defaults (useful for CI).
 
-### 3. Laufzeit
+### 3. Duration
 
-Je nach Server-Leistung dauert die Installation **10 bis 25 Minuten**. Die größten Zeitfresser sind der Download der Node-Module und das Kompilieren der Python-Abhängigkeiten.
+Depending on server performance, installation takes **10 to 25 minutes**. The biggest time sinks are the download of the node modules and the compilation of the Python dependencies.
 
-### 4. Ergebnis
+### 4. Result
 
-Bei erfolgreichem Abschluss erscheint eine Zusammenfassung:
+On success the script prints a summary:
 
 ```
 ==========================================================
- SETUP ERFOLGREICH ABGESCHLISTEN!
+ SETUP COMPLETED SUCCESSFULLY!
 ==========================================================
-INSTALLIERTE VERSIONEN:
+INSTALLED VERSIONS:
  - Node.js:            v24.21.0
  - npm:                10.x.y
  - n8n:                2.41.6
  - crewai / fastapi:   1.15.23 / 0.142.2
  - uvicorn:            0.53.0
 ----------------------------------------------------------
-ZUGANGSDATEN:
- - n8n Domain:         https://n8n.formhabr.com
- - CrewAI Endpoint:    http://127.0.0.1:8000
+CREDENTIALS:
+ - n8n domain:         https://n8n.formhabr.com
+ - CrewAI endpoint:    http://127.0.0.1:8000
 ----------------------------------------------------------
-GENERIERTE PASSWÖRTER — bitte sicher verwahren:
- - Postgres Admin ('postgres'):   <generiertes Passwort>
- - Datenbank-User (n8n_db):   <generiertes Passwort>
- - N8N_ENCRYPTION_KEY:            <generierter Schlüssel>
- - Datenbank-Name:      n8n_db
- - CrewAI-Serviceuser: crewai (unprivilegiert, kein Login)
+GENERATED PASSWORDS — keep these safe:
+ - Postgres admin ('postgres'):   <generated password>
+ - Database user (n8n_db):       <generated password>
+ - N8N_ENCRYPTION_KEY:            <generated key>
+ - Database name:         n8n_db
+ - CrewAI service user:   crewai (unprivileged, no login)
 ----------------------------------------------------------
-ERFORDERLICH FÜR DEN CREWAI-SERVICE:
-Ohne eingetragenen API-Key liefert /run-agent einen 500er.
+REQUIRED FOR THE CREWAI SERVICE:
+Without an API key /run-agent returns a 500.
    cp /opt/agent_service/.env.example /opt/agent_service/.env
    nano /opt/agent_service/.env
    chown root:crewai /opt/agent_service/.env
    chmod 640 /opt/agent_service/.env
    systemctl restart crewai
 ----------------------------------------------------------
-ACHTUNG: Diese Passwörter stehen jetzt im Terminal-Scrollback
-und in Logs, falls die Ausgabe umgeleitet wurde. Bewahre die
-Credentials-Datei sicher auf und lösche sie nicht:
+CAUTION: these passwords are now in your terminal scrollback
+and in any logs if the output was redirected. Keep the
+credentials file safe and do not delete it:
    /root/n8n-setup-credentials.txt
    cat /root/n8n-setup-credentials.txt
 ```
 
-*(Die npm-Version hängt von der zum Installationszeitpunkt verfügbaren npm-10-Release ab und kann variieren. Die Passwörter sind hier nur als Platzhalter dargestellt.)*
+*(The npm version depends on the npm 10 release available at install time and may vary. The passwords are shown as placeholders here.)*
 
-### 5. API-Key eintragen (Pflicht)
+### 5. Enter your API key (required)
 
-Das Setup ist danach **vollständig**, aber der Agent-Dienst kann noch keine Anfragen beantworten. Das Skript legt absichtlich nur eine Vorlage an — ein im Quelltext hinterlegter Key würde beim nächsten Commit dauerhaft in der Git-Historie landen.
+The setup is **complete** at this point, but the agent service cannot answer any request yet. The script deliberately only writes a template — an API key committed to the source would end up permanently in the git history.
 
 ```bash
 cp /opt/agent_service/.env.example /opt/agent_service/.env
 nano /opt/agent_service/.env                 # ANTHROPIC_API_KEY=sk-ant-...
-chown root:crewai /opt/agent_service/.env    # Gruppe der Dienst muss lesen können
-chmod 640 /opt/agent_service/.env            # NICHT 600 — siehe Erklärung
+chown root:crewai /opt/agent_service/.env    # the service's group must be able to read it
+chmod 640 /opt/agent_service/.env            # NOT 600 — see below
 sudo systemctl restart crewai
 ```
 
-> **Warum `640` und nicht `600`:** Der Dienst läuft als Systemuser `crewai`, nicht als root. Bei `600` mit Besitzer root käme er nicht mehr an den Key und jeder Request liefe in einen 500er. `root:crewai 640` bedeutet: root darf alles, die Gruppe `crewai` darf lesen, alle anderen Benutzer des Servers nicht.
+> **Why `640` and not `600`:** the service runs as the system user `crewai`, not as root. With `600` and owner root it would no longer reach the key, and every request would fail with a 500. `root:crewai 640` means: root may do anything, the `crewai` group may read, and no other user on the server may.
 
-Prüfen, ohne den Key auszugeben:
+Verify without printing the key:
 
 ```bash
 cd /opt/agent_service && ./venv/bin/python -c "
 import main, os
 k = os.getenv('ANTHROPIC_API_KEY') or ''
-print('Key gesetzt:', bool(k))
-print('Platzhalter:', k == 'sk-ant-hier-eintragen')
-print('Modell:     ', main._build_llm().model)
+print('Key set:   ', bool(k))
+print('Placeholder:', k == 'sk-ant-enter-key-here')
+print('Model:     ', main._build_llm().model)
 "
 ```
 
-Danach der erste echte Lauf (kostet Tokens):
+Then the first real run (costs tokens):
 
 ```bash
 curl -sX POST http://127.0.0.1:8000/run-agent \
   -H 'Content-Type: application/json' \
-  -d '{"topic":"Vorteile von n8n"}' | python3 -m json.tool
+  -d '{"topic":"Advantages of n8n"}' | python3 -m json.tool
 ```
 
 ---
 
-## Nach der Installation: manuelle Schritte in aaPanel
+## Manual steps in aaPanel after installation
 
-Das Skript konfiguriert die Dienste, **nicht** den Reverse Proxy und **nicht** SSL. Diese Schritte musst du in aaPanel selbst durchführen:
+The script configures the services, **not** the reverse proxy and **not** SSL. You have to do these steps yourself in aaPanel:
 
-1. **Website anlegen** — unter *Websites* eine Website für deine Subdomain erstellen.
-2. **SSL aktivieren** — unter *SSL* ein Let's-Encrypt-Zertifikat ausstellen und **Force HTTPS** aktivieren.
-3. **Reverse Proxy einrichten** — auf `http://127.0.0.1:5678` weiterleiten.
+1. **Create a website** — under *Websites*, create a website for your subdomain.
+2. **Enable SSL** — under *SSL*, issue a Let's Encrypt certificate and turn on **Force HTTPS**.
+3. **Set up the reverse proxy** — forward to `http://127.0.0.1:5678`.
 
-> **Wichtig:** n8n lauscht bewusst nur auf `127.0.0.1` (siehe `N8N_LISTEN_ADDRESS`). **Solange der Reverse Proxy nicht eingerichtet ist, ist n8n nicht erreichbar.** Das ist beabsichtigt: so liegt der Port niemals ungeschützt im Internet.
+> **Important:** n8n deliberately listens on `127.0.0.1` only (see `N8N_LISTEN_ADDRESS`). **As long as the reverse proxy is not configured, n8n is unreachable.** That is intentional: the port is never exposed to the internet unprotected.
 
-Optional kannst du im selben Panel einen zweiten Reverse Proxy auf `http://127.0.0.1:8000` für den CrewAI-Service anlegen.
+Optionally, you can add a second reverse proxy in the same panel pointing at `http://127.0.0.1:8000` for the CrewAI service.
 
-### Ersten n8n-Login
+### First n8n login
 
-Beim ersten Aufruf von n8n legst du ein Owner-Konto an. **Die Zugangsdaten dafür vergibst du selbst** — sie werden nicht vom Skript erzeugt.
+On the first visit to n8n you create an owner account. **You choose those credentials yourself** — the script does not generate them.
 
 ---
 
-## Zugangsdaten
+## Credentials
 
-Die generierten Passwörter werden **am Ende des Setups ausgegeben** und zusätzlich dauerhaft in einer Datei gesichert, die nur für root lesbar ist:
+The generated passwords are **printed at the end of the setup** and additionally stored permanently in a file readable by root only:
 
 ```bash
 cat /root/n8n-setup-credentials.txt
 ```
 
-Inhalt:
+Contents:
 
-| Variable | Bedeutung |
-|----------|-----------|
-| `DOMAIN` | Konfigurierte Subdomain |
-| `DB_NAME` / `DB_USER` | Name der PostgreSQL-Datenbank und ihres Users |
-| `DB_PASS` | Passwort des Datenbank-Users |
-| `DB_ADMIN_PASS` | Passwort des PostgreSQL-Superusers `postgres` |
-| `N8N_ENCRYPTION_KEY` | Schlüssel zum Entschlüsseln der n8n-Credentials |
-| `N8N_PORT` / `CREWAI_PORT` | Ports der beiden Dienste |
-| `TIMEZONE` | Systemzeitzone, an n8n übergeben |
+| Variable | Meaning |
+|----------|---------|
+| `DOMAIN` | Configured subdomain |
+| `DB_NAME` / `DB_USER` | Name of the PostgreSQL database and its user |
+| `DB_PASS` | Password of the database user |
+| `DB_ADMIN_PASS` | Password of the PostgreSQL superuser `postgres` |
+| `N8N_ENCRYPTION_KEY` | Key used to decrypt n8n credentials |
+| `N8N_PORT` / `CREWAI_PORT` | Ports of the two services |
+| `TIMEZONE` | System timezone, passed on to n8n |
 
-> **⚠️ Unbedingt sichern.** Besonders `N8N_ENCRYPTION_KEY`: Geht dieser Schlüssel verloren, sind **alle** in n8n gespeicherten Credentials (API-Keys, OAuth-Tokens, Datenbank-Verbindungen) **unwiederbringlich unentschlüsselbar**. Es gibt keine Wiederherstellung — nur ein neues, leeres n8n.
+> **⚠️ Back this up.** `N8N_ENCRYPTION_KEY` in particular: if this key is lost, **all** credentials stored in n8n (API keys, OAuth tokens, database connections) become **permanently undecryptable**. There is no recovery — only a new, empty n8n.
 
 ---
 
-## Gepinnte Versionen
+## Pinned versions
 
-Alle Abhängigkeiten sind bewusst **fest versioniert** am Skriptanfang, statt mit `@latest` installiert zu werden. Grund: n8n veröffentlicht fast wöchentlich neue Minor-Versionen, und ein ungepinntes `@latest` kann durch ein Update von heute auf morgen den Aufbau brechen.
+All dependencies are deliberately **pinned** at the top of the script instead of being installed with `@latest`. The reason: n8n ships new minor versions almost weekly, and an unpinned `@latest` can break the setup between one day and the next.
 
-| Komponente | Version | Hinweis |
-|------------|---------|---------|
-| Node.js | `24.21.0` | Active LTS. n8n verlangt ≥ 20.19 |
-| n8n | `2.41.6` | Stable-Kanal. **Nicht** 3.x — enthält Breaking Changes |
+| Component | Version | Note |
+|-----------|---------|------|
+| Node.js | `24.21.0` | Active LTS. n8n requires ≥ 20.19 |
+| n8n | `2.41.6` | Stable channel. **Not** 3.x — it contains breaking changes |
 | crewai | `1.15.23` | |
 | fastapi | `0.142.2` | |
 | uvicorn | `0.53.0` | |
 
-### Versionen aktualisieren
+### Updating versions
 
-Die Pins stehen im Block am Anfang von `setup.sh`:
+The pins live in the block at the top of `setup.sh`:
 
 ```bash
 NODE_VERSION="24.21.0"
@@ -265,191 +266,189 @@ FASTAPI_VERSION="0.142.2"
 UVICORN_VERSION="0.53.0"
 ```
 
-Nach einer Änderung das Skript erneut ausführen. Es ist idempotent: vorhandene Services werden ersetzt, Datenbank und Zugangsdaten bleiben erhalten.
+After changing a version, run the script again. It is idempotent: existing services are replaced, database and credentials are preserved.
 
-> **Hinweis zu n8n 3.0:** Die n8n-Changelog kündigt 3.0 für Oktober 2026 an. Ein Upgrade auf die 3.x-Reihe ist **kein einfacher Versionswechsel** — lies vor dem Update die [Breaking-Changes-Dokumentation](https://docs.n8n.io/changelog/v30-breaking-changes).
+> **Note on n8n 3.0:** the n8n changelog announces 3.0 for October 2026. Upgrading to the 3.x line is **not a simple version bump** — read the [breaking changes documentation](https://docs.n8n.io/changelog/v30-breaking-changes) before updating.
 
 ---
 
-## Wichtige Umgebungsvariablen
+## Important environment variables
 
-Diese Variablen stehen in `/root/n8n/ecosystem.config.cjs` und werden von PM2 an n8n durchgereicht:
+These variables live in `/root/n8n/ecosystem.config.cjs` and are passed through by PM2 to n8n:
 
-| Variable | Wert | Zweck |
-|----------|------|-------|
-| `N8N_ENCRYPTION_KEY` | generiert | **Pflicht.** Entschlüsselt gespeicherte Credentials |
-| `N8N_LISTEN_ADDRESS` | `127.0.0.1` | Bindet n8n nur lokal — kein offener Port |
-| `N8N_PROXY_HOPS` | `1` | Korrekte IP-Erkennung hinter dem Reverse Proxy |
-| `N8N_EDITOR_BASE_URL` | `https://$DOMAIN/` | Editor-URL hinter dem Proxy |
-| `N8N_SECURE_COOKIE` | `true` | Cookies nur über HTTPS |
-| `N8N_WEBHOOK_URL` | `https://$DOMAIN/` | Basis-URL für Test- und Produktions-Webhooks |
-| `N8N_UNVERIFIED_PACKAGES_ENABLED` | `false` | Installation ungeprüfter Community-Pakete unterbinden |
-| `N8N_RUNNERS_TASK_TIMEOUT` | `300` | Task-Timeout in Sekunden |
-| `N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES` | `268435456` | Max. Entpackgröße: 256 MiB |
-| `N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES` | `1000` | Max. ZIP-Einträge beim Entpacken |
-| `GENERIC_TIMEZONE` | Systemzeitzone | Zeitzone in n8n |
-| `DB_POSTGRESDB_*` | generiert | Datenbankverbindung |
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `N8N_ENCRYPTION_KEY` | generated | **Required.** Decrypts stored credentials |
+| `N8N_LISTEN_ADDRESS` | `127.0.0.1` | Binds n8n locally only — no open port |
+| `N8N_PROXY_HOPS` | `1` | Correct client IP detection behind the reverse proxy |
+| `N8N_EDITOR_BASE_URL` | `https://$DOMAIN/` | Editor URL behind the proxy |
+| `N8N_SECURE_COOKIE` | `true` | Cookies over HTTPS only |
+| `N8N_WEBHOOK_URL` | `https://$DOMAIN/` | Base URL for test and production webhooks |
+| `N8N_UNVERIFIED_PACKAGES_ENABLED` | `false` | Blocks installation of unverified community packages |
+| `N8N_RUNNERS_TASK_TIMEOUT` | `300` | Task timeout in seconds |
+| `N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES` | `268435456` | Max decompressed size: 256 MiB |
+| `N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES` | `1000` | Max zip entries when unpacking |
+| `GENERIC_TIMEZONE` | system timezone | Timezone in n8n |
+| `DB_POSTGRESDB_*` | generated | Database connection |
 
-### Konfiguration anpassen
+### Adjusting the configuration
 
 ```bash
 sudo nano /root/n8n/ecosystem.config.cjs
 sudo pm2 restart n8n --update-env
 ```
 
-### Warnungen beim Start von n8n
+### Warnings during n8n startup
 
-Beim ersten Start meldet n8n eine Reihe von Deprecation-Warnungen. Die wichtigsten davon und wie sie behandelt werden:
+On first startup n8n reports a series of deprecation warnings. The most important ones and how they are handled:
 
-| Meldung | Bedeutung | Status |
-|---------|-----------|--------|
-| `WEBHOOK_URL -> Use N8N_WEBHOOK_URL instead` | Alte Variable, wird entfernt | ✅ **Gefixt** — das Skript setzt `N8N_WEBHOOK_URL` |
-| `N8N_UNVERIFIED_PACKAGES_ENABLED ... will change to false` | Default ändert sich | ✅ Gefixt — explizit auf `false` gesetzt |
-| `N8N_RUNNERS_TASK_TIMEOUT ... will be reduced from 300 to 60` | Default ändert sich | ✅ Gefixt — auf `300` festgeschrieben |
-| `N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES ... 2 GiB to 256 MiB` | Default wird kleiner | ✅ Gefixt — auf 256 MiB gesetzt |
-| `N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES ... 5000 to 1000` | Default wird kleiner | ✅ Gefixt — auf `1000` gesetzt |
-| `Failed to start Python task runner in internal mode` | Bekannter n8n-Bug bei npm-Installation ([n8n-io/n8n#31149](https://github.com/n8n-io/n8n/issues/31149)) | ⚠️ Bekannt, nicht behoben |
-| `Running n8n outside a container is deprecated` | Künftige Versionen verlangen Docker | ⚠️ Bewusste Entscheidung, siehe unten |
+| Message | Meaning | Status |
+|---------|---------|--------|
+| `WEBHOOK_URL -> Use N8N_WEBHOOK_URL instead` | Old variable, being removed | ✅ **Fixed** — the script sets `N8N_WEBHOOK_URL` |
+| `N8N_UNVERIFIED_PACKAGES_ENABLED ... will change to false` | Default is changing | ✅ Fixed — set to `false` explicitly |
+| `N8N_RUNNERS_TASK_TIMEOUT ... will be reduced from 300 to 60` | Default is changing | ✅ Fixed — pinned to `300` |
+| `N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES ... 2 GiB to 256 MiB` | Default is shrinking | ✅ Fixed — set to 256 MiB |
+| `N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES ... 5000 to 1000` | Default is shrinking | ✅ Fixed — set to `1000` |
+| `Failed to start Python task runner in internal mode` | Known n8n bug with npm installs ([n8n-io/n8n#31149](https://github.com/n8n-io/n8n/issues/31149)) | ⚠️ Known, not fixed |
+| `Running n8n outside a container is deprecated` | Future versions will require Docker | ⚠️ Deliberate decision, see below |
 
-**Zum Python-Runner:** Diese Meldung betrifft ausschließlich den **Python-Code-Node** in n8n selbst. Sie tritt auf, weil n8n bei einer npm-Installation kein eigenes venv mitbringt — das offizielle Docker-Image liefert es mit. Alles andere funktioniert normal. Der separate **CrewAI-Service** dieses Setups ist davon **nicht** betroffen; er hat sein eigenes venv unter `/opt/agent_service/venv`.
+**About the Python runner:** this message concerns only n8n's own **Python code node**. It appears because an npm installation of n8n does not ship its own venv — the official Docker image includes one. Everything else works normally. The separate **CrewAI service** of this setup is **not** affected; it has its own venv under `/opt/agent_service/venv`.
 
-**Zur Container-Warnung:** n8n hat den Betrieb außerhalb von Docker als veraltet eingestuft und kündigt an, dass künftige Versionen das offizielle Docker-Image voraussetzen. Dieses Setup nutzt bewusst **PM2 statt Docker**. Aktuell läuft n8n 2.41.6 problem damit. Sollte eine künftige n8n-Version die Installation ohne Container verweigern, ist ein Umstieg auf Docker Compose der nächste Schritt — die gepinnte `N8N_VERSION` im Skript macht ein solches Update planbar.
+**About the container warning:** n8n has deprecated running outside of Docker and announces that future versions will require the official Docker image. This setup deliberately uses **PM2 instead of Docker**. n8n 2.41.6 currently runs fine that way. Should a future n8n version refuse the non-container installation, moving to Docker Compose is the next step — and the pinned `N8N_VERSION` in the script makes such an update plannable.
 
 ---
 
-## Befehle für den Alltag
+## Day-to-day commands
 
-### n8N
+### n8n
 
 ```bash
-pm2 status                              # Status aller PM2-Prozesse
-pm2 logs n8n --lines 50                # Letzte 50 Logzeilen
-pm2 logs n8n --err                     # Nur Fehler
-pm2 restart n8n                        # Neustart
-pm2 stop n8n                           # Stoppen
-pm2 save                               # Aktuelle Prozessliste speichern
+pm2 status                              # status of all PM2 processes
+pm2 logs n8n --lines 50                # last 50 log lines
+pm2 logs n8n --err                     # errors only
+pm2 restart n8n                        # restart
+pm2 stop n8n                           # stop
+pm2 save                               # save the current process list
 ```
 
-### CrewAI-Service
+### CrewAI service
 
 ```bash
 sudo systemctl status crewai
 sudo systemctl restart crewai
-sudo journalctl -u crewai -f           # Live-Logs
-sudo systemctl cat crewai              # Unit inkl. Härtungsoptionen ansehen
-sudo systemctl show crewai --property=User   # muss crewai ergeben, nicht root
-id crewai                              # Rechte des Dienstusers prüfen
-ls -la /opt/agent_service/.env         # muss root:crewai 640 sein
+sudo journalctl -u crewai -f           # live logs
+sudo systemctl cat crewai              # unit including hardening options
+sudo systemctl show crewai --property=User   # must print crewai, not root
+id crewai                              # check the service user's rights
+ls -la /opt/agent_service/.env         # must be root:crewai 640
 curl -sX POST http://127.0.0.1:8000/run-agent \
   -H 'Content-Type: application/json' \
-  -d '{"topic":"Vorteile von n8n"}' | python3 -m json.tool
+  -d '{"topic":"Advantages of n8n"}' | python3 -m json.tool
 ```
 
-### API-Key (Nachschlagewerk)
+### API key (quick reference)
 
-Das Einrichten ist oben unter [Schritt 5](#5-api-key-eintragen-pflicht) beschrieben. Hier die Variablen und ihre Bedeutung:
+How to set it up is described above under [Step 5](#5-enter-your-api-key-required). Here are the variables and what they mean:
 
-| Variable | Bedeutung |
-|----------|-----------|
-| `ANTHROPIC_API_KEY` | Anthropic-API-Key. Pflicht — ohne ihn liefert `/run-agent` einen 500er. |
-| `MODEL` | Modell-ID mit Provider-Präfix, z. B. `anthropic/claude-haiku-4-5`. Ohne Präfix fällt crewai auf LiteLLM zurück, das extra installiert werden müsste. |
-| `MAX_TOKENS` | Obergrenze der Antwort. Bei Anthropic ein Pflichtparameter; Haiku 4.5 lässt 64000 zu, Default hier 8192. |
+| Variable | Meaning |
+|----------|---------|
+| `ANTHROPIC_API_KEY` | Anthropic API key. Required — without it `/run-agent` returns a 500. |
+| `MODEL` | Model ID including the provider prefix, e.g. `anthropic/claude-haiku-4-5`. Without the prefix crewai falls back to LiteLLM, which would have to be installed separately. |
+| `MAX_TOKENS` | Upper limit for the response. It is a required parameter for Anthropic; Haiku 4.5 allows 64000, the default here is 8192. |
 
-Die Datei muss `root:crewai 640` sein. Nach jeder Änderung an `.env` ein `systemctl restart crewai` — der laufende Prozess liest die Datei nur beim Start.
+The file must be `root:crewai 640`. After every change to `.env`, run `systemctl restart crewai` — the running process only reads the file at startup.
 
-Die Antwort auf `/run-agent` enthält `model` und einen `usage`-Block mit `prompt_tokens`, `completion_tokens` und `total_tokens`, damit sich die Kosten eines Laufs ablesen lassen.
+The response from `/run-agent` contains `model` and a `usage` block with `prompt_tokens`, `completion_tokens` and `total_tokens`, so the cost of a run can be read off directly.
 
-### Datenbank
+### Database
 
 ```bash
-sudo -u postgres psql -d n8n_db        # In die Datenbank einsteigen
-sudo -u postgres psql -c '\l'          # Alle Datenbanken auflisten
+sudo -u postgres psql -d n8n_db        # enter the database
+sudo -u postgres psql -c '\l'          # list all databases
 sudo systemctl status postgresql
 ```
 
-### Autostart prüfen
+### Checking autostart
 
 ```bash
 systemctl is-enabled pm2-root crewai postgresql
 ```
 
-Alle drei sollten `enabled` ausgeben.
+All three should print `enabled`.
 
-### Zustand nach einem Neustart prüfen
+### Checking the state after a reboot
 
-Nach einem Reboot sollte alles von selbst wiederkommen:
+After a reboot everything should come back on its own:
 
 ```bash
 systemctl status crewai --no-pager | head -3
-systemctl show crewai --property=User      # muss crewai sein, nicht root
-ss -ltn | grep 8000                        # muss lauschen
+systemctl show crewai --property=User      # must be crewai, not root
+ss -ltn | grep 8000                        # must be listening
 ```
 
-Der erste Start nach einem Reboot dauert länger als der Folgestart — der Import von crewai erzeugt dann zum ersten Mal die `.pyc`-Dateien. Rechne hier mit 10 bis 20 Sekunden.
+The first start after a reboot takes longer than subsequent ones — importing crewai generates the `.pyc` files for the first time. Allow 10 to 20 seconds here.
 
 ---
 
-## Sicherheitshinweise
+## Security notes
 
-### Was das Skript tut
+### What the script does
 
-- ✅ Passwörter und `N8N_ENCRYPTION_KEY` werden am Ende ausgegeben **und** dauerhaft in einer `chmod 600`-Datei gesichert (`umask 077`), die nur für root lesbar ist
-- ✅ n8n lauscht nur auf `127.0.0.1` — Port 5678 ist nicht öffentlich erreichbar
-- ✅ SQL-Parameter werden über `psql -v` und `:'var'` übergeben statt per Heredoc-Interpolation
-- ✅ Die Domain-Eingabe wird gegen ungültige Zeichen validiert
-- ✅ Alle Passwörter sind 32 Zeichen alphanumerisch und werden deterministisch generiert
-- ✅ SQL-Fehler führen zum Abbruch (`ON_ERROR_STOP=1`) statt zu einem stillen Weiterlaufen mit kaputter Datenbank
-- ✅ Der Anthropic-API-Key steht ausschliesslich in der `.env` unter `/opt/agent_service` (ausserhalb jedes Webroots) — nie im Quelltext und damit nie in der Git-Historie
-- ✅ Der CrewAI-Service läuft als eigener unprivilegierter Systemuser `crewai` mit `/usr/sbin/nologin`, nicht als root
-- ✅ Die systemd-Unit nutzt `ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp` und weitere Härtungsoptionen; beschreibbar ist nur `/var/lib/crewai`
+- ✅ Passwords and the `N8N_ENCRYPTION_KEY` are printed at the end **and** stored permanently in a `chmod 600` file (`umask 077`) readable by root only
+- ✅ n8n listens on `127.0.0.1` only — port 5678 is not publicly reachable
+- ✅ SQL parameters are passed via `psql -v` and `:'var'` instead of through heredoc interpolation
+- ✅ The domain input is validated against invalid characters
+- ✅ All passwords are 32 alphanumeric characters and are generated deterministically
+- ✅ SQL errors abort the script (`ON_ERROR_STOP=1`) instead of silently continuing with a broken database
+- ✅ The Anthropic API key exists only in the `.env` under `/opt/agent_service` (outside any web root) — never in the source, and therefore never in the git history
+- ✅ The CrewAI service runs as its own unprivileged system user `crewai` with `/usr/sbin/nologin`, not as root
+- ✅ The systemd unit uses `ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp` and further hardening options; only `/var/lib/crewai` is writable
 
-### Was du wissen solltest
+### What you should know
 
-> **ℹ️ Der CrewAI-Service läuft als Systemuser `crewai`.**
-> Der FastAPI-Server führt von LLM-Agenten generierten Code aus — crewai interpretiert Modell-Ausgaben als Anweisungen. Deshalb läuft der Dienst nicht als root, sondern als eigener unprivilegierter Systemuser ohne Login-Shell. Die Unit setzt zusätzlich `ProtectSystem=strict` (nur `/var/lib/crewai` beschreibbar), `NoNewPrivileges`, `PrivateTmp` und `ProtectKernelTunables`.
+> **ℹ️ The CrewAI service runs as the system user `crewai`.**
+> The FastAPI server executes code generated by LLM agents — crewai interprets model output as instructions. That is why the service does not run as root but as its own unprivileged system user without a login shell. The unit additionally sets `ProtectSystem=strict` (only `/var/lib/crewai` writable), `NoNewPrivileges`, `PrivateTmp` and `ProtectKernelTunables`.
 >
-> Das ist **Schadensbegrenzung, keine Sandbox**. Ein Fehler im Modell oder ein manipulierter Prompt kann den Dienst zum Absturz bringen und Daten unter `/var/lib/crewai` verändern — den Host und andere Dienste erreicht er damit nicht.
+> This is **blast-radius limitation, not a sandbox**. A bug in the model or a manipulated prompt can crash the service and modify data under `/var/lib/crewai` — but it cannot reach the host or the other services.
 >
-> n8n selbst läuft weiterhin über PM2 als root. Das ist eine bewusste Entscheidung des Setups: PM2 wird in [dieser Anleitung](https://docs.n8n.io/hosting/installation/npm/) für den Systemdienst verwendet und bringt kein eigenes Rechtekonzept mit. Für eine stärkere Isolierung wäre ein Container-Setup der nächste Schritt.
+> n8n itself still runs via PM2 as root. That is a deliberate decision of this setup: PM2 is used for the system service in [this documentation](https://docs.n8n.io/hosting/installation/npm/) and comes with no permission model of its own. For stronger isolation, a container setup would be the next step.
 >
-> Das ist Schadensbegrenzung, keine Sandbox. Ein Fehler im Modell kann den Dienst zum Absturz bringen, aber nicht mehr direkt den Host kompromittieren.
->
-> Die `.env` mit dem API-Key liegt unter `/opt/agent_service` als `root:crewai` mit `640` — für root und die Dienstgruppe lesbar, für alle anderen nicht.
+> The `.env` holding the API key lives under `/opt/agent_service` as `root:crewai` with `640` — readable by root and the service group, by nobody else.
 
-> **⚠️ Es werden keine Firewall-Regeln gesetzt.**
-> Das Skript konfiguriert keine Firewall. Für einen Produktivbetrieb solltest du zusätzlich nur die nötigen Ports öffnen (22, 80, 443) und alle anderen schließen.
+> **⚠️ No firewall rules are set.**
+> The script does not configure a firewall. For production use you should additionally open only the ports you need (22, 80, 443) and close all others.
 
-> **⚠️ Das PostgreSQL-Superuser-Passwort wird gesetzt.**
-> Das Skript setzt das Passwort des Users `postgres`. Bei einer bestehenden Installation mit `peer`-Authentifizierung kann das die lokale Anmeldung verändern.
+> **⚠️ The PostgreSQL superuser password is set.**
+> The script sets the password of the `postgres` user. On an existing installation using `peer` authentication this can change local login behaviour.
 
-> **⚠️ Keine Datensicherung eingerichtet.**
-> Das Skript richtet **keine** Backups ein. Richte vor dem Produktivbetrieb eine Sicherung der Datenbank `n8n_db` ein.
+> **⚠️ No backups are configured.**
+> The script sets up **no** backups. Configure a backup of the `n8n_db` database before going into production.
 
 ---
 
-## Verhalten bei erneutem Lauf
+## Behaviour on a re-run
 
-Das Skript ist **idempotent** und kann gefahrlos mehrfach ausgeführt werden:
+The script is **idempotent** and can safely be run multiple times:
 
-- **Passwörter werden wiederverwendet**, nicht neu generiert. Dadurch bleibt die bestehende Datenbankverbindung gültig
-- **`N8N_ENCRYPTION_KEY` bleibt unverändert** — andernfalls wären alle gespeicherten Credentials verloren
-- **Die Domain aus der Credentials-Datei wird als Standard angeboten**
-- Bestehende Swap-Datei, Pakete und systemd-Unit werden erkannt und übersprungen
-- PM2-Prozess `n8n` wird vor dem Neustart gelöscht und neu angelegt
+- **Passwords are reused**, not regenerated. This keeps the existing database connection valid
+- **`N8N_ENCRYPTION_KEY` stays unchanged** — otherwise all stored credentials would be lost
+- **The domain from the credentials file is offered as the default**
+- An existing swap file, installed packages and the systemd unit are detected and skipped
+- The PM2 process `n8n` is deleted before the restart and recreated
 
-Damit eignet sich das Skript auch, um **einzelne Komponenten zu aktualisieren**, ohne eine Neuinstallation zu machen.
+This also makes the script suitable for **updating individual components** without doing a fresh installation.
 
 ---
 
-## Fehlerbehebung
+## Troubleshooting
 
-### Das Skript bricht sofort mit „Fehler in Zeile NNN" ab
+### The script aborts immediately with "error on line NNN"
 
-Das Skript nutzt `set -euo pipefail` und einen ERR-Trap, der die fehlerhafte Zeile nennt. Prüfe die Ausgabe von `bash -x setup.sh` für eine vollständige Ablaufverfolgung.
+The script uses `set -euo pipefail` and an ERR trap that names the offending line. Check the output of `bash -x setup.sh` for a full trace.
 
 ### `pm2: command not found`
 
-Nach der Node-Installation wurde der Pfad eventuell nicht neu eingelesen:
+After the Node installation the path may not have been reloaded:
 
 ```bash
 source /etc/profile.d/nvm.sh 2>/dev/null
@@ -457,74 +456,74 @@ export PATH="$PATH:$(npm root -g | sed 's|/node_modules$|/../bin|')"
 hash -r
 ```
 
-### n8n startet nicht
+### n8n does not start
 
 ```bash
 pm2 logs n8n --lines 100
 pm2 status
 ```
 
-Häufigste Ursache: die Datenbankverbindung schlägt fehl. Prüfe:
+Most common cause: the database connection fails. Check:
 
 ```bash
 sudo -u postgres psql -c "SELECT 1 FROM pg_roles WHERE rolname='n8n_db';"
 ```
 
-### `n8n läuft nicht` trotz erfolgreicher Installation
+### `n8n is not running` despite a successful installation
 
-Der Zustand kann auch an einer falschen `N8N_ENCRYPTION_KEY` liegen — etwa wenn die Credentials-Datei zwischen zwei Läufen gelöscht wurde. Prüfe, ob die Datei existiert:
+The state can also be down to a wrong `N8N_ENCRYPTION_KEY` — for example if the credentials file was deleted between two runs. Check whether the file exists:
 
 ```bash
 ls -l /root/n8n-setup-credentials.txt
 ```
 
-Fehlt sie, erzeugt ein erneuter Lauf einen **neuen** Key. Nur sinnvoll, wenn n8n ohnehin neu aufgesetzt werden soll.
+If it is missing, another run generates a **new** key. That only makes sense if you want to set n8n up from scratch anyway.
 
-### n8n ist nicht erreichbar
+### n8n is unreachable
 
-Prüfe, ob der Reverse Proxy in aaPanel eingerichtet ist:
+Check whether the reverse proxy is configured in aaPanel:
 
 ```bash
-curl -I http://127.0.0.1:5678       # muss lokal antworten
+curl -I http://127.0.0.1:5678       # must respond locally
 ```
 
-Antwortet der Port lokal, aber nicht über die Domain, liegt der Fehler am Reverse Proxy oder am SSL-Zertifikat.
+If the port responds locally but not via the domain, the problem is the reverse proxy or the SSL certificate.
 
-### Swap wurde nicht angelegt
+### Swap was not created
 
 ```bash
 swapon --show
 grep swap /etc/fstab
 ```
 
-Auf btrfs und einigen XFS-Setups wird `fallocate` nicht unterstützt; das Skript weicht dann automatisch auf `dd` aus.
+On btrfs and some XFS setups `fallocate` is not supported; the script automatically falls back to `dd`.
 
 ---
 
-## Projektstruktur
+## Project structure
 
 ```
 .
-├── setup.sh                 # Das Setup-Skript für einen frischen Server
-├── README.md                # Diese Datei
-└── .gitattributes           # LF-Zeilenenden
+├── setup.sh                 # The setup script for a fresh server
+├── README.md                # This file
+└── .gitattributes           # LF line endings
 ```
 
-`setup.sh` ist für **frische Server** gedacht und legt alles von Grund auf an. Bestehende Installationen damit erneut zu fahren überschreibt die vorhandenen Daten — bei n8n also die Workflows und bei PostgreSQL die Datenbank.
+`setup.sh` is meant for **fresh servers** and creates everything from scratch. Running it again on an existing installation overwrites the existing data — for n8n that means the workflows, and for PostgreSQL the database.
 
 ---
 
-## Lizenz
+## License
 
-Dieses Skript steht unter der [MIT-Lizenz](https://opensource.org/licenses/MIT).
+This script is released under the [MIT License](https://opensource.org/licenses/MIT).
 
 ---
 
-## Verwandte Links
+## Related links
 
-- [n8n Dokumentation](https://docs.n8n.io/)
-- [n8n Changelog](https://docs.n8n.io/changelog)
-- [CrewAI Dokumentation](https://docs.crewai.com/)
-- [FastAPI Dokumentation](https://fastapi.tiangolo.com/)
+- [n8n documentation](https://docs.n8n.io/)
+- [n8n changelog](https://docs.n8n.io/changelog)
+- [CrewAI documentation](https://docs.crewai.com/)
+- [FastAPI documentation](https://fastapi.tiangolo.com/)
 - [aaPanel](https://www.aapanel.com/)
-- [Node.js Releases](https://nodejs.org/en/about/previous-releases)
+- [Node.js releases](https://nodejs.org/en/about/previous-releases)
