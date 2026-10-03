@@ -14,6 +14,7 @@ Repository: [github.com/mysugarape/N8N-CrewAI-Setup-Script](https://github.com/m
 - [Was das Skript macht](#was-das-skript-macht)
 - [Voraussetzungen](#voraussetzungen)
 - [Installation](#installation)
+- [Bestehende Installation auf Anthropic umstellen](#bestehende-installation-auf-anthropic-umstellen)
 - [Nach der Installation: manuelle Schritte in aaPanel](#nach-der-installation-manuelle-schritte-in-aapanel)
 - [Zugangsdaten](#zugangsdaten)
 - [Gepinnte Versionen](#gepinnte-versionen)
@@ -145,6 +146,45 @@ Credentials-Datei sicher auf und lösche sie nicht:
 ```
 
 *(Die npm-Version hängt von der zum Installationszeitpunkt verfügbaren npm-10-Release ab und kann variieren. Die Passwörter sind hier nur als Platzhalter dargestellt.)*
+
+---
+
+## Bestehende Installation auf Anthropic umstellen
+
+Falls dein Server noch mit einer älteren Fassung von `setup.sh` eingerichtet wurde — der Agent-Service lag dann unter `/var/www/agent_service` und lief mit OpenAI — gibt es dafür ein eigenes Migrationsskript:
+
+```bash
+sudo bash fix-crewai-anthropic.sh
+```
+
+Es erzeugt exakt den Zustand, den die aktuelle `setup.sh` auf einem frischen Server herstellen würde, nur eben auf deiner bestehenden Installation. **n8n, die Datenbank und die Credentials-Datei werden dabei nicht angefasst.**
+
+Was das Skript tut:
+
+- liest den Port aus der bestehenden systemd-Unit, damit ein selbst gewählter Port nicht auf 8000 zurückfällt
+- sichert die alte `main.py` und `.env` nach `/opt/agent_service.backup-<Zeitstempel>/`
+- stoppt den Service, legt `/opt/agent_service` mit neuem venv an und installiert `crewai[anthropic]` plus `python-dotenv`
+- übernimmt eine vorhandene `.env`, damit ein eingetragener Key nicht verloren geht
+- schreibt `main.py`, `.env.example` und die systemd-Unit neu und startet den Dienst
+- prüft anschließend, ob der Dienst wirklich läuft **und** auf dem Port lauscht — `systemctl restart` exit 0 auch dann, wenn der Prozess direkt danach stirbt
+- benennt das alte Verzeichnis zu `/var/www/agent_service.old-<Zeitstempel>` um, statt es zu löschen
+
+Danach wie bei einem frischen Setup:
+
+```bash
+nano /opt/agent_service/.env          # Anthropic-Key eintragen
+chmod 600 /opt/agent_service/.env
+sudo systemctl restart crewai
+```
+
+> **Warum das alte venv nicht mitverschoben wird:** `pyvenv.cfg`, die Shebangs in `bin/` und die `.pth-Dateien enthalten absolute Pfade auf `/var/www/agent_service`. Ein `mv` ergäbe ein formal vorhandenes, aber unbrauchbares venv mit der Fehlermeldung `bad interpreter`. Der Neuaufbau ist schneller als jede Reparatur — der alte Ordner bleibt ja als Umbenennung erhalten.
+
+Prüfen, ob der alte Zustand wirklich weg ist:
+
+```bash
+ls -d /var/www/agent_service*          # sollte nur noch .old-* zeigen
+systemctl cat crewai | grep WorkingDirectory   # muss /opt/agent_service sein
+```
 
 ---
 
@@ -287,7 +327,7 @@ sudo systemctl restart crewai
 sudo journalctl -u crewai -f           # Live-Logs
 curl -sX POST http://127.0.0.1:8000/run-agent \
   -H 'Content-Type: application/json' \
-  -d '{"topic":"Vorteile von n8n"}' | python -m json.tool
+  -d '{"topic":"Vorteile von n8n"}' | python3 -m json.tool
 ```
 
 ### API-Key einrichten (erforderlich)
